@@ -1,0 +1,4 @@
+{
+  "name": "add_function",
+  "prompt": "Add a function add(a, b) to math_utils.py that returns the sum of a and b. Leave subtract as it is."
+}

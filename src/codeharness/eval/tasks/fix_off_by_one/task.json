@@ -1,0 +1,4 @@
+{
+  "name": "fix_off_by_one",
+  "prompt": "indexes.py last_index returns the wrong index. Make last_index(items) return the index of the last item."
+}

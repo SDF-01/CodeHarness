@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codeharness"
+version = "0.1.0"
+description = "A small local coding harness for offline language models."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+codeharness = "codeharness.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+codeharness = ["eval/tasks/*/*", "skills/*/SKILL.md", "rules/*.md", "agents/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]

@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CodeHarness</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #121611;
+      --panel: #1c2418;
+      --ink: #e7f0df;
+      --muted: #9aab90;
+      --line: #31402c;
+      --you: #d7e26a;
+      --tool: #8fd0c6;
+      --answer: #f3f7ee;
+      --warn: #e2b657;
+      --bad: #e07a68;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 16px/1.45 "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }
+    header, main, form { max-width: 920px; margin: 0 auto; }
+    header { padding: 24px 20px 8px; }
+    h1 { margin: 0 0 8px; font-size: 28px; font-weight: 650; }
+    .meta { color: var(--muted); margin: 0; }
+    .meter {
+      margin: 18px 20px 0;
+      padding: 14px 16px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }
+    .meter p { margin: 0 0 8px; }
+    .bar {
+      height: 14px;
+      background: #0d100c;
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .bar span {
+      display: block;
+      height: 100%;
+      width: 0;
+      background: var(--you);
+    }
+    #tape { list-style: none; padding: 12px 20px 120px; margin: 0; }
+    #tape li {
+      margin: 0 0 10px;
+      padding: 12px 14px;
+      border-left: 4px solid var(--line);
+      background: var(--panel);
+      border-radius: 0 10px 10px 0;
+      white-space: pre-wrap;
+    }
+    #tape li.user, #tape li.prompt { border-color: var(--you); }
+    #tape li.harness, #tape li.status { border-color: #7ec8e3; }
+    #tape li.ollama { border-color: #8fce7a; }
+    #tape li.tool { border-color: var(--tool); }
+    #tape li.answer { border-color: var(--answer); }
+    #tape li.permission, #tape li.status { border-color: var(--warn); }
+    #tape li.error { border-color: var(--bad); }
+    .kind { display: block; color: var(--muted); font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 4px; }
+    form {
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      padding: 12px 20px 16px;
+      background: rgba(18, 22, 17, 0.94);
+      border-top: 1px solid var(--line);
+    }
+    .row { display: flex; gap: 8px; }
+    textarea {
+      flex: 1;
+      min-height: 52px;
+      resize: vertical;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: #0d100c;
+      color: var(--ink);
+      padding: 10px 12px;
+      font: inherit;
+    }
+    button {
+      border: 0;
+      border-radius: 10px;
+      padding: 0 16px;
+      font: inherit;
+      cursor: pointer;
+    }
+    #send { background: var(--you); color: #1a1e10; font-weight: 650; }
+    .actions { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+    .actions button { background: var(--panel); color: var(--ink); border: 1px solid var(--line); padding: 8px 12px; }
+    #approve { display: none; gap: 8px; margin-bottom: 8px; }
+    #approve button { padding: 10px 16px; }
+    #allow { background: var(--tool); color: #10211e; }
+    #deny { background: var(--bad); color: #2a1210; }
+    button:disabled { opacity: 0.5; cursor: default; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>CodeHarness</h1>
+    <p class="meta" id="meta">Loading the local session.</p>
+  </header>
+  <section class="meter">
+    <p id="meter-label">Prompt tokens: 0</p>
+    <div class="bar" aria-hidden="true"><span id="meter-fill"></span></div>
+  </section>
+  <ol id="tape"></ol>
+  <form id="composer">
+    <div id="approve">
+      <span id="approve-label"></span>
+      <button type="button" id="allow">Allow</button>
+      <button type="button" id="deny">Deny</button>
+    </div>
+    <div class="actions">
+      <button type="button" id="plan">Plan</button>
+      <button type="button" id="build">Build</button>
+      <button type="button" id="launch">Launch</button>
+      <button type="button" id="handoff">Handoff</button>
+    </div>
+    <div class="row">
+      <textarea id="task" placeholder="Tell the harness what to change in this project."></textarea>
+      <button id="send" type="submit">Send</button>
+    </div>
+  </form>
+  <script>
+    const tape = document.getElementById("tape");
+    const meta = document.getElementById("meta");
+    const meterLabel = document.getElementById("meter-label");
+    const meterFill = document.getElementById("meter-fill");
+    const task = document.getElementById("task");
+    const send = document.getElementById("send");
+    const approve = document.getElementById("approve");
+    const approveLabel = document.getElementById("approve-label");
+    let seen = 0;
+
+    function paint(state) {
+      meta.textContent = state.model + " at " + state.server + " · " + (state.agent || "build") + " · session " + state.session_id + " · root " + state.root;
+      const limit = state.context_limit || 1;
+      const used = state.latest_prompt || 0;
+      const pct = Math.min(100, Math.round((used / limit) * 100));
+      meterFill.style.width = pct + "%";
+      meterLabel.textContent = "Latest prompt: " + used + " of " + limit + " tokens (" + state.token_source + "). Completion so far: " + state.completion_tokens + ". Tool calls: " + state.tool_calls + ".";
+      send.disabled = state.busy;
+      for (const id of ["plan", "build", "launch", "handoff"]) {
+        document.getElementById(id).disabled = state.busy;
+      }
+      if (state.pending) {
+        approve.style.display = "flex";
+        approveLabel.textContent = state.pending.tool === "web_gui"
+          ? (state.pending.detail || "Build this as a realistic web app?")
+          : state.pending.tool + (state.pending.detail ? " (" + state.pending.detail + ")" : "");
+      } else {
+        approve.style.display = "none";
+      }
+      for (const event of state.events) {
+        if (event.id <= seen) continue;
+        const item = document.createElement("li");
+        item.className = event.kind;
+        const kind = document.createElement("span");
+        kind.className = "kind";
+        kind.textContent = event.kind;
+        item.appendChild(kind);
+        item.appendChild(document.createTextNode(event.text));
+        tape.appendChild(item);
+        seen = event.id;
+      }
+      if (state.events.length) {
+        tape.lastElementChild.scrollIntoView({block: "nearest"});
+      }
+    }
+
+    async function refresh() {
+      const response = await fetch("/api/state");
+      paint(await response.json());
+    }
+
+    async function sendText(text, clearTask) {
+      send.disabled = true;
+      const response = await fetch("/api/turn", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({text})
+      });
+      if (response.ok && clearTask) task.value = "";
+      await refresh();
+    }
+
+    document.getElementById("composer").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const text = task.value.trim();
+      if (!text) return;
+      await sendText(text, true);
+    });
+    document.getElementById("plan").addEventListener("click", () => sendText("plan", false));
+    document.getElementById("build").addEventListener("click", () => sendText("build", false));
+    document.getElementById("launch").addEventListener("click", () => sendText("launch", false));
+    document.getElementById("handoff").addEventListener("click", () => {
+      const text = task.value.trim();
+      if (!text) return;
+      sendText("handoff " + text, true);
+    });
+
+    async function vote(allow) {
+      await fetch("/api/permission", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({allow})
+      });
+      await refresh();
+    }
+    document.getElementById("allow").addEventListener("click", () => vote(true));
+    document.getElementById("deny").addEventListener("click", () => vote(false));
+    refresh();
+    setInterval(refresh, 400);
+  </script>
+</body>
+</html>

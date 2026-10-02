@@ -1,0 +1,7 @@
+{
+  "name": "gui_clock",
+  "prompt": "Build a tkinter digital clock in clock.py. The window must stay open.",
+  "permissions": {
+    "write_file": "allow"
+  }
+}

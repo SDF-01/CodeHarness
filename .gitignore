@@ -1,0 +1,9 @@
+.venv/
+projects/
+codeharness.json
+__pycache__/
+.pytest_cache/
+*.egg-info/
+.codeharness/
+dist/
+build/

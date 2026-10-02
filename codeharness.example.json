@@ -1,0 +1,27 @@
+{
+  "base_url": "http://127.0.0.1:11434/v1",
+  "model": "",
+  "api_key": "",
+  "context_limit": 8192,
+  "response_reserve": 1024,
+  "max_tool_output_chars": 4000,
+  "max_steps": 12,
+  "doom_repeat_limit": 3,
+  "request_timeout": 120,
+  "shell_timeout": 20,
+  "check_command": "",
+  "launch_command": "",
+  "permissions": {
+    "read_file": "allow",
+    "search": "allow",
+    "list_files": "allow",
+    "edit_file": "ask",
+    "write_file": "ask",
+    "shell": "ask",
+    "git_status": "allow",
+    "git_diff": "allow",
+    "git_add": "ask",
+    "git_commit": "ask",
+    "doom_loop": "ask"
+  }
+}

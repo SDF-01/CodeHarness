@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CodeHarness updates</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #121611;
+      --panel: #1c2418;
+      --ink: #e7f0df;
+      --muted: #9aab90;
+      --line: #31402c;
+      --you: #d7e26a;
+      --tool: #8fd0c6;
+      --answer: #f3f7ee;
+      --warn: #e2b657;
+      --bad: #e07a68;
+      --ok: #8fce7a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 17px/1.5 "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }
+    header, main { max-width: 820px; margin: 0 auto; padding: 0 20px; }
+    header { padding-top: 36px; padding-bottom: 8px; }
+    .robot {
+      margin: 0 0 16px;
+      color: var(--tool);
+      font: 14px/1.15 "Cascadia Mono", "Consolas", monospace;
+      white-space: pre;
+    }
+    h1 { margin: 0 0 8px; font-size: 32px; font-weight: 650; letter-spacing: -0.02em; }
+    h2 { margin: 0 0 10px; font-size: 22px; }
+    h3 { margin: 0 0 6px; font-size: 16px; }
+    .lede { margin: 0; color: var(--muted); max-width: 62ch; }
+    section {
+      margin: 22px 0;
+      padding: 18px 18px 8px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+    }
+    p { margin: 0 0 12px; }
+    ul, ol { margin: 0 0 14px; padding-left: 1.2em; }
+    li { margin: 0 0 8px; }
+    a { color: var(--you); }
+    code, .path {
+      font-family: "Cascadia Mono", Consolas, monospace;
+      font-size: 0.92em;
+    }
+    .path { color: var(--tool); }
+    .transcript {
+      margin: 0 0 14px;
+      padding: 14px 16px;
+      background: #0d100c;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      font: 14px/1.45 "Cascadia Mono", Consolas, monospace;
+      white-space: pre-wrap;
+    }
+    .you { color: var(--you); }
+    .work { color: #7ec8e3; }
+    .made { color: var(--tool); }
+    .ask { color: var(--warn); }
+    .result { color: var(--answer); }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 14px; }
+    .card {
+      margin: 0;
+      padding: 12px 12px 4px;
+      background: #141a12;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+    }
+    .card p { color: var(--muted); font-size: 15px; }
+    .tag {
+      display: inline-block;
+      margin: 0 0 8px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #243022;
+      color: var(--you);
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    table { width: 100%; border-collapse: collapse; margin: 0 0 14px; font-size: 15px; }
+    th, td { text-align: left; padding: 8px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; }
+    .ok { color: var(--ok); }
+    footer { color: var(--muted); font-size: 14px; padding-bottom: 36px; }
+    @media (max-width: 720px) {
+      .grid { grid-template-columns: 1fr; }
+      h1 { font-size: 26px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <p class="robot">         ___
+        [o_o]
+       &lt;[___]&gt;
+         | |
+        /   \</p>
+    <h1>What changed in CodeHarness</h1>
+    <p class="lede">The local model is still qwen2.5-coder:7b. The harness around it is what grew: a fixed build, review, and launch procedure, plus skill, rule, and agent files it can actually read.</p>
+  </header>
+  <main>
+    <section>
+      <h2>The short version</h2>
+      <p>A turn used to end when the repo tests passed, even if the new program was broken. It can also dump tool names and token counts. A turn now names the file, asks in plain language, and only calls the result good when that program holds up.</p>
+      <div class="transcript"><span class="you">you &gt; build an ATM window</span>
+<span class="work">Working
+  Creating atm_gui.py</span>
+<span class="made">Created
+  atm_gui.py</span>
+<span class="ask">Needs a yes
+  Open atm_gui.py in a window?
+yes? [y/n]</span>
+<span class="result">Result
+  The window is open.</span></div>
+      <p>Token counts stay off this screen. They are still available on the local page at <span class="path">http://127.0.0.1:8765/</span>.</p>
+    </section>
+
+    <section>
+      <h2>The loop</h2>
+      <table>
+        <thead>
+          <tr><th>Situation</th><th>What the harness does</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>A new Python file was written</td>
+            <td>It parses that file. Passing the harness pytest suite is not proof the new app works.</td>
+          </tr>
+          <tr>
+            <td>A shell command fails</td>
+            <td>The answer is blocked until a later command succeeds, or the step limit hits.</td>
+          </tr>
+          <tr>
+            <td><span class="path">pip install tkinter</span></td>
+            <td>Rejected before it runs. Tkinter is already part of Python.</td>
+          </tr>
+          <tr>
+            <td>A tkinter file exits immediately</td>
+            <td>Treated as a failure. The next step is told: a window must stay open, and <span class="path">mainloop</span> is required.</td>
+          </tr>
+          <tr>
+            <td>You ask to test the harness, or you edit a file that is not a new program</td>
+            <td><span class="path">check_command</span> from <span class="path">codeharness.json</span> can still run.</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>Each failure is stored as one lesson on the session. The next model call sees only the latest few lessons, not the whole tool dump.</p>
+    </section>
+
+    <section>
+      <h2>Skills, rules, and agents</h2>
+      <p>The file shapes match public specs. The text inside them is ours. Nothing was copied from a private prompt.</p>
+      <div class="grid">
+        <article class="card">
+          <p class="tag">Skills</p>
+          <h3>Agent Skills</h3>
+          <p>One folder per skill, with <span class="path">SKILL.md</span>. Required fields are <span class="path">name</span> and <span class="path">description</span>. The description picks the skill. The body loads only after a match, and only for two skills.</p>
+        </article>
+        <article class="card">
+          <p class="tag">Rules</p>
+          <h3>Cursor rules</h3>
+          <p><span class="path">description</span>, <span class="path">globs</span>, and <span class="path">alwaysApply</span>. An always-on rule is in every prompt. A glob rule is included only when a file from this turn matches. <span class="path">AGENTS.md</span> in the project is the same idea, capped so it cannot fill the budget.</p>
+        </article>
+        <article class="card">
+          <p class="tag">Agents</p>
+          <h3>OpenCode agents</h3>
+          <p><span class="path">description</span> and <span class="path">mode: primary</span>. <span class="path">build</span> may create and edit files. <span class="path">plan</span> may not. Type <span class="path">plan</span> or <span class="path">build</span> at the prompt to switch.</p>
+        </article>
+      </div>
+      <ul>
+        <li><span class="path">vibe-build</span>: turn a request into one runnable file.</li>
+        <li><span class="path">gui-app</span>: a tkinter window, with no pip install.</li>
+        <li><span class="path">verify</span>: read the failure and fix that file.</li>
+        <li><span class="path">stdlib</span>: do not pip-install the standard library.</li>
+        <li><span class="path">opencode</span>: search or read a small range, then edit one exact match.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Where the files are</h2>
+      <ul>
+        <li><span class="path">src/codeharness/skills/</span></li>
+        <li><span class="path">src/codeharness/rules/</span></li>
+        <li><span class="path">src/codeharness/agents/</span></li>
+        <li><span class="path">AGENTS.md</span> at the project root</li>
+        <li>Lessons and the current agent live in <span class="path">.codeharness/sessions.db</span></li>
+      </ul>
+      <p class="ok">52 tests passed with a fake model. That check does not call Ollama.</p>
+    </section>
+
+    <section>
+      <h2>See it in the terminal</h2>
+      <p>A chat that is already open is still the old process. Type <span class="path">exit</span>, then start a new one:</p>
+      <div class="transcript">.\scripts\harness.ps1 chat</div>
+      <ol>
+        <li>Type a task at <span class="path">you &gt;</span>.</li>
+        <li>Answer <span class="path">y</span> or <span class="path">n</span> when it asks to create a file or open a window.</li>
+        <li>Type <span class="path">plan</span> when you want a look with no edits, and <span class="path">build</span> when you want files again.</li>
+        <li>Type <span class="path">run</span> to compile and launch. Type <span class="path">exit</span> to stop.</li>
+      </ol>
+    </section>
+    <footer>
+      <p>This report is a snapshot of the harness update. The model weights did not change.</p>
+    </footer>
+  </main>
+</body>
+</html>
