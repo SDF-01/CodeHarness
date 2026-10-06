@@ -89,10 +89,11 @@ def test_a_build_asks_before_a_realistic_web_app(tmp_path) -> None:
         model,
         HarnessConfig(project_root=tmp_path, model="test"),
         ask=ask,
+        reply=lambda question: "a website",
     )
     text = session.messages[0].content
     store.close()
-    assert asked == ["web_gui", "build_go"]
+    assert asked == []
     assert "shadcn" in text
     assert "index.html" in text
 
@@ -110,6 +111,7 @@ def test_declining_a_web_app_stays_local(tmp_path) -> None:
         model,
         HarnessConfig(project_root=tmp_path, model="test"),
         ask=lambda name, detail: False,
+        reply=lambda question: "a desktop app",
     )
     text = session.messages[0].content
     store.close()
@@ -129,11 +131,11 @@ def test_an_explicit_stack_skips_the_web_question(tmp_path) -> None:
         session,
         "build a react dashboard",
         model,
-        HarnessConfig(project_root=tmp_path, model="test"),
+        HarnessConfig(project_root=tmp_path, model="test", open_windows=False),
         ask=lambda name, detail: asked.append(name) or True,
     )
     store.close()
-    assert asked == ["build_go"]
+    assert asked == []
 
 
 def test_plan_and_build_switch_the_agent(tmp_path) -> None:

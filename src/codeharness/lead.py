@@ -6,6 +6,7 @@ import re
 from dataclasses import replace
 from pathlib import Path
 
+from codeharness.branches import run_stack
 from codeharness.config import HarnessConfig
 from codeharness.diagnostics import diagnose, diagnose_root
 from codeharness.loop import EventHandler, LoopEvent, run_turn
@@ -17,7 +18,7 @@ from codeharness.session import Session, SessionStore, StoredMessage
 from codeharness.snapshot import capture
 from codeharness.stack import expects_stack, probe_health
 from codeharness.todos import Todo, load_todos, mark_done, parse_plan, save_todos
-from codeharness.web_prompt import WEB_GUI_QUESTION, apply_web_choice, offer_web_gui
+from codeharness.web_prompt import apply_kind, kind_question, task_kind
 
 _EMPTY = "The model returned an empty reply."
 _FILE = re.compile(r"[A-Za-z0-9_./\\-]+\.[A-Za-z0-9]+")
@@ -37,6 +38,20 @@ def is_lead_task(text: str, root: Path) -> bool:
     return expects_stack(text)
 
 
+def lead_stack(
+    store: SessionStore,
+    session: Session,
+    task: str,
+    model: ChatModel,
+    config: HarnessConfig,
+    ask: AskFunc,
+    on_event: EventHandler | None = None,
+) -> int:
+    """Snapshot the folder, then run the page, API, and review branches."""
+    capture(config.project_root)
+    return run_stack(store, session, task, model, config, ask, on_event)
+
+
 def run_lead(
     store: SessionStore,
     session: Session,
@@ -45,30 +60,27 @@ def run_lead(
     config: HarnessConfig,
     ask: AskFunc,
     on_event: EventHandler | None = None,
+    reply=None,
 ) -> int:
     task = text
-    if offer_web_gui(task):
+    question = kind_question(task)
+    if question and reply is not None:
         _phase(store, session, "question", on_event)
-        allowed = ask("web_gui", WEB_GUI_QUESTION)
-        choice = (
-            "Realistic web app. HTML, CSS, React, Tailwind, and shadcn."
-            if allowed
-            else "Local program. No website."
-        )
-        _emit(on_event, LoopEvent("status", choice, title="Harness", body=choice))
-        task = apply_web_choice(task, allowed)
+        task = apply_kind(task, reply(question))
+    elif task_kind(task):
+        task = apply_kind(task, task)
     if session.title == "new session" and task.strip():
         store.set_title(session, task.strip().splitlines()[0][:60])
     store.append(session, StoredMessage(role="user", content=task))
     root = config.project_root
     _phase(store, session, "map", on_event)
-    _emit(on_event, LoopEvent("status", repo_map(root), title="Harness", body=repo_map(root)))
     if expects_stack(task) and not (root / "server.py").is_file():
         capture(root)
         notice = write_stack_skeleton(root)
         if notice:
             _emit(on_event, LoopEvent("status", notice, title="Harness", body=notice))
     _phase(store, session, "plan", on_event)
+    _emit(on_event, LoopEvent("status", "Planning", title="Working", body="Planning"))
     plan_text = _write_plan(store, model, config, ask, on_event, task, root)
     if _plan_is_empty(plan_text):
         message = "The plan was empty. Build did not start."

@@ -2,24 +2,25 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
-from codeharness.branches import run_stack
 from codeharness.catalog import skill_catalog, skill_count, tool_catalog, tool_count
 from codeharness.config import HarnessConfig
 from codeharness.context import estimate_messages
-from codeharness.lead import is_lead_task, run_lead
+from codeharness.lead import is_lead_task, lead_stack, run_lead
 from codeharness.loop import EventHandler, LoopEvent, run_turn
+from codeharness.repomap import repo_map
 from codeharness.model import ChatModel
 from codeharness.permissions import AskFunc
-from codeharness.projects import assign_project
+from codeharness.projects import assign_project, is_tweak
 from codeharness.review import brief_report
 from codeharness.run import compile_and_launch, is_run_command
 from codeharness.session import Session, SessionStore
-from codeharness.snapshot import restore
+from codeharness.snapshot import capture, restore
 from codeharness.stack import expects_stack
 from codeharness.todos import open_todos
-from codeharness.web_prompt import WEB_GUI_QUESTION, apply_web_choice, offer_web_gui
+from codeharness.web_prompt import apply_kind, kind_question, task_kind
 
 _EMPTY_PLAN = "The model returned an empty reply."
 
@@ -32,6 +33,7 @@ def handle_turn(
     config: HarnessConfig,
     ask: AskFunc,
     on_event: EventHandler | None = None,
+    reply=None,
 ) -> int:
     lowered = " ".join(text.strip().lower().split())
     if lowered.startswith("/"):
@@ -54,20 +56,22 @@ def handle_turn(
         return launch_with_repair(store, session, model, config, ask, on_event)
     task = handoff_task(text)
     if task is not None:
-        return handoff(store, session, task, model, config, ask, on_event)
+        return handoff(store, session, task, model, config, ask, on_event, reply)
     if is_lead_task(text, config.project_root):
-        return run_lead(store, session, text, model, config, ask, on_event)
-    chosen = _with_web_choice(text, ask, on_event)
+        return run_lead(store, session, text, model, config, ask, on_event, reply)
+    chosen = _with_web_choice(text, on_event, reply)
     if expects_stack(chosen):
-        return run_stack(store, session, chosen, model, config, ask, on_event)
+        return lead_stack(store, session, chosen, model, config, ask, on_event)
+    note, turn_config = _follow_up(text, notice, config)
     run_turn(
         store=store,
         session=session,
         user_text=chosen,
         model=model,
-        config=config,
+        config=turn_config,
         ask=ask,
         on_event=on_event,
+        note=note,
     )
     return 0
 
@@ -91,14 +95,15 @@ def handoff(
     config: HarnessConfig,
     ask: AskFunc,
     on_event: EventHandler | None,
+    reply=None,
 ) -> int:
     if not task:
         message = "Type handoff and the task. Example: handoff build a clock."
         _emit(on_event, LoopEvent("answer", message, title="Result", body=message))
         return 0
-    task = _with_web_choice(task, ask, on_event)
+    task = _with_web_choice(task, on_event, reply)
     if expects_stack(task):
-        return run_stack(store, session, task, model, config, ask, on_event)
+        return lead_stack(store, session, task, model, config, ask, on_event)
     store.set_agent(session, "plan")
     _emit(on_event, LoopEvent("status", "Planning. Files stay unchanged.", title="Harness", body="Planning. Files stay unchanged."))
     plan = run_turn(
@@ -160,17 +165,36 @@ def launch_with_repair(
     return code
 
 
-def _with_web_choice(text: str, ask, on_event: EventHandler | None) -> str:
-    if not offer_web_gui(text):
-        return text
-    allowed = ask("web_gui", WEB_GUI_QUESTION)
-    message = (
-        "Realistic web app. HTML, CSS, React, Tailwind, and shadcn."
-        if allowed
-        else "Local program. No website."
+def _follow_up(text: str, notice: str, config: HarnessConfig) -> tuple[str, HarnessConfig]:
+    """A tweak stays in the current folder, with the repo map and edit-only writes."""
+    if notice or not is_tweak(text):
+        return "", config
+    capture(config.project_root)
+    note = (
+        repo_map(config.project_root)
+        + "\nEdit the existing file that matches this request. Do not start a new program. "
+        + "Use edit_file unless the file is missing."
     )
-    _emit(on_event, LoopEvent("status", message, title="Harness", body=message))
-    return apply_web_choice(text, allowed)
+    return note, _edits_only(config)
+
+
+def _edits_only(config: HarnessConfig) -> HarnessConfig:
+    root = config.project_root
+    if not root.is_dir() or not any(path.is_file() for path in root.iterdir()):
+        return config
+    permissions = dict(config.permissions)
+    if permissions.get("write_file") != "deny":
+        permissions["write_file"] = "deny"
+    return replace(config, permissions=permissions)
+
+
+def _with_web_choice(text: str, on_event: EventHandler | None, reply) -> str:
+    question = kind_question(text)
+    if question and reply is not None:
+        return apply_kind(text, reply(question))
+    if task_kind(text):
+        return apply_kind(text, text)
+    return text
 
 
 def _plan_is_empty(text: str) -> bool:

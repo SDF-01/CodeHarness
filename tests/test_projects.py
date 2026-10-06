@@ -16,6 +16,21 @@ def _write(path: str, content: str) -> Completion:
     )
 
 
+def _edit(path: str, old: str, new: str) -> Completion:
+    return Completion(
+        content="",
+        tool_calls=[
+            ToolCall(
+                id="e",
+                name="edit_file",
+                arguments={"path": path, "old_string": old, "new_string": new},
+            )
+        ],
+        prompt_tokens=1,
+        completion_tokens=1,
+    )
+
+
 def test_task_slug_uses_the_program_name() -> None:
     assert task_slug("build an atm") == "atm"
     assert task_slug("handoff build a digital clock") == "digital-clock"
@@ -23,21 +38,15 @@ def test_task_slug_uses_the_program_name() -> None:
 
 
 def test_a_build_lands_in_its_own_folder(tmp_path) -> None:
-    def ask(name, detail):
-        return name != "web_gui"
-
     model = ScriptedModel(
         [
-            Completion(content="- [ ] Create atm.py", tool_calls=[], prompt_tokens=1, completion_tokens=1),
             _write("atm.py", "print('atm')\n"),
             Completion(content="built", tool_calls=[], prompt_tokens=1, completion_tokens=1),
-            Completion(content="No problems.", tool_calls=[], prompt_tokens=1, completion_tokens=1),
-            _write("atm.py", "print('atm-fixed')\n"),
+            _edit("atm.py", "print('atm')\n", "print('atm-fixed')\n"),
             Completion(content="fixed", tool_calls=[], prompt_tokens=1, completion_tokens=1),
-            Completion(content="- [ ] Create clock.py", tool_calls=[], prompt_tokens=1, completion_tokens=1),
             _write("clock.py", "print('clock')\n"),
             Completion(content="clocked", tool_calls=[], prompt_tokens=1, completion_tokens=1),
-            Completion(content="No problems.", tool_calls=[], prompt_tokens=1, completion_tokens=1),
+            Completion(content="left it", tool_calls=[], prompt_tokens=1, completion_tokens=1),
         ]
     )
     store = SessionStore(database_path(tmp_path))
@@ -45,16 +54,20 @@ def test_a_build_lands_in_its_own_folder(tmp_path) -> None:
     config = HarnessConfig(
         project_root=tmp_path,
         model="test",
-        permissions={**HarnessConfig().permissions, "write_file": "allow"},
+        permissions={**HarnessConfig().permissions, "write_file": "allow", "edit_file": "allow"},
     )
-    handle_turn(store, session, "build an atm", model, config, ask=ask)
-    handle_turn(store, session, "fix the menu", model, config, ask=ask)
-    handle_turn(store, session, "build a clock", model, config, ask=ask)
+    handle_turn(store, session, "build an atm", model, config, ask=lambda name, detail: False)
+    handle_turn(store, session, "fix the menu", model, config, ask=lambda name, detail: False)
+    handle_turn(store, session, "build a clock", model, config, ask=lambda name, detail: False)
+    handle_turn(store, session, "make the button red", model, config, ask=lambda name, detail: False)
     store.close()
     assert (tmp_path / "projects" / "atm" / "atm.py").read_text(encoding="utf-8") == "print('atm-fixed')\n"
     assert (tmp_path / "projects" / "clock" / "clock.py").read_text(encoding="utf-8") == "print('clock')\n"
     assert not (tmp_path / "atm.py").exists()
     assert not (tmp_path / "clock.py").exists()
+    assert not (tmp_path / "projects" / "button-red").exists()
+    joined = "\n".join(item.get("content") or "" for batch in model.seen_messages for item in batch)
+    assert "atm.py" in joined
 
 
 def test_launch_from_the_harness_uses_projects(tmp_path) -> None:

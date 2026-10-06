@@ -241,6 +241,11 @@ class Console:
         if item.kind == "answer":
             self.block("Result", (item.body or item.text).strip())
             return
+        if item.kind == "status":
+            line = progress_line(item.body or item.text)
+            if line:
+                self._status_once("Working", line)
+            return
         title = item.title or _TITLES.get(item.kind, item.kind)
         self.block(title, item.body or item.text)
 
@@ -316,6 +321,20 @@ class Console:
 
     def read_prompt(self) -> str:
         return input(self._glyph())
+
+    def ask_text(self, prompt: str) -> str:
+        width = min(max(self._width(), 48), 72)
+        line = "+" + ("-" * (width - 2)) + "+"
+        self._write(self._hex(line, _BRONZE))
+        self._write(self._hex("| One question", _AMBER))
+        for row in _wrap(prompt, width - 4):
+            self._write(self._hex("| " + row, _TEXT))
+        self._write(self._hex(line, _BRONZE))
+        try:
+            return input(self._glyph()).strip()
+        except EOFError:
+            self._write("")
+            return ""
 
     def _glyph(self) -> str:
         glyph = "❯ "
@@ -399,6 +418,31 @@ class Console:
         return f"\033[{code}m{text}\033[0m"
 
 
+def progress_line(body: str) -> str:
+    """A short progress line. Repo maps and stack echoes stay off the screen."""
+    text = " ".join(body.split())
+    if not text:
+        return ""
+    lowered = text.lower()
+    if lowered.startswith("files:") or "server.py:" in lowered or "suffixes:" in lowered:
+        return ""
+    if lowered.startswith("local program") or lowered.startswith("realistic web"):
+        return ""
+    if "do not create a website" in lowered:
+        return ""
+    if len(text) > 90:
+        return ""
+    if "planning" in lowered:
+        return "Planning"
+    if "building" in lowered:
+        return "Building"
+    if lowered.startswith("wrote ") or lowered.startswith("queued:") or lowered.startswith("project folder:"):
+        return text
+    if lowered.endswith("branch."):
+        return text
+    return ""
+
+
 def format_status(
     *,
     model: str,
@@ -440,6 +484,22 @@ def _paint_bar(bar: str, percent: int) -> str:
     else:
         color = "50;205;50"
     return f"\033[38;2;{color}m{bar}\033[0m"
+
+
+def _wrap(text: str, width: int) -> list[str]:
+    words = text.split()
+    if not words:
+        return [""]
+    lines: list[str] = []
+    current = words[0]
+    for word in words[1:]:
+        if len(current) + 1 + len(word) <= width:
+            current += " " + word
+        else:
+            lines.append(current)
+            current = word
+    lines.append(current)
+    return lines
 
 
 def _fit(text: str, width: int) -> str:

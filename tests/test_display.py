@@ -1,7 +1,7 @@
 from io import StringIO
 
 from codeharness.config import HarnessConfig
-from codeharness.display import Console, approval_sentence, format_status
+from codeharness.display import Console, approval_sentence, format_status, progress_line
 from codeharness.loop import LoopEvent, run_turn
 from codeharness.model import Completion, ToolCall
 from codeharness.session import SessionStore, database_path
@@ -104,6 +104,20 @@ def test_status_bar_shortens_below_52_columns() -> None:
     assert "clock" not in compact
     assert "100/1000" in compact
     assert narrow == "qwen2.5-coder:7b  review"
+
+
+def test_repo_map_stays_off_the_screen() -> None:
+    buffer = StringIO()
+    view = Console(out=buffer, color=False)
+    view.event(LoopEvent("status", "Files: a.py\nSuffixes: .py\nserver.py: no\nindex.html: no", title="Harness"))
+    view.event(LoopEvent("status", "Local program. No website.", title="Harness"))
+    view.event(LoopEvent("status", "Planning", title="Working"))
+    text = buffer.getvalue()
+    assert "Files:" not in text
+    assert "No website" not in text
+    assert "Harness" not in text
+    assert "Planning" in text
+    assert progress_line("Project folder: projects/atm") == "Project folder: projects/atm"
 
 
 def test_approval_names_the_file_not_the_tool() -> None:

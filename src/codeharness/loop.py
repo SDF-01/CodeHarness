@@ -120,6 +120,7 @@ def _run_turn(
     opened: set[str] = set()
     shell_problem = ""
     advice_sent = False
+    paste_sent = False
 
     for _step in range(config.max_steps):
         built = build_context(
@@ -201,6 +202,10 @@ def _run_turn(
                 _send_back(store, session, "Run failed.", runtime_problem, on_event)
                 continue
             text = completion.content.strip() or "The model returned an empty reply."
+            if not written and not paste_sent and "```" in text:
+                paste_sent = True
+                _send_back(store, session, "Write the file.", "Do not paste the source.", on_event)
+                continue
             store.append(session, StoredMessage(role="assistant", content=text))
             _emit(on_event, LoopEvent("answer", f"agent: {text}", title="Result", body=text))
             _emit(on_event, LoopEvent("tokens", format_usage(usage, prefix="turn tokens")))

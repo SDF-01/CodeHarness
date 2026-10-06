@@ -90,8 +90,8 @@ def _system_prompt(
     extra = prompt_addons(task, config.project_root, _touched_paths(stored), lessons, agent)
     if extra:
         lines.append(extra)
-    if pruned and note.strip():
-        lines.append("Digest:\n" + note.strip())
+    if note.strip():
+        lines.append("Context:\n" + note.strip())
     if config.check_command and wants_harness_tests(task):
         lines.append(f"Check command: {config.check_command}")
     if config.launch_command:

@@ -41,6 +41,7 @@ _VAGUE = {"it", "this", "that", "them", "one", "something"}
 _RESERVED = {"con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "lpt1", "lpt2", "lpt3"}
 _RUN = {"run", "run it", "launch", "launch it"}
 _NEW = re.compile(r"^(handoff\s+)?(build|create|make|design|write|implement)\b")
+_TWEAK = re.compile(r"^(fix|change|update|edit)\b|^make\s+the\b")
 
 
 def task_slug(text: str) -> str:
@@ -55,14 +56,22 @@ def task_slug(text: str) -> str:
     return slug
 
 
-def wants_new_folder(text: str) -> bool:
+def wants_new_folder(text: str, has_project: bool = False) -> bool:
     """True when this message starts a program, not a tweak of the current one."""
     stripped = " ".join(text.strip().lower().split())
+    if has_project and is_tweak(stripped):
+        return False
     if stripped in {"plan", "build"} or stripped in _RUN:
         return False
     if _NEW.match(stripped) is None:
         return False
     return task_slug(stripped).split("-")[0] not in _VAGUE
+
+
+def is_tweak(text: str) -> bool:
+    """True for a change to the program already open, such as make the button red."""
+    stripped = " ".join(text.strip().lower().split())
+    return _TWEAK.match(stripped) is not None
 
 
 def assign_project(
@@ -79,7 +88,8 @@ def assign_project(
             return config, ""
         return _use(store, session, config, folder)
 
-    if wants_new_folder(text):
+    current = store.work_dir(session)
+    if wants_new_folder(text, has_project=bool(current)):
         folder = (config.project_root / PROJECTS_DIR / task_slug(text)).resolve()
         folder.mkdir(parents=True, exist_ok=True)
         return _use(store, session, config, folder)

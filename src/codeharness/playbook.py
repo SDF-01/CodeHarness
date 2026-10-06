@@ -55,7 +55,12 @@ _WHEN_STOP = {
 _AGENTS_CAP = 600
 _LESSON_LIMIT = 3
 _SKILL_CAP = 4
-_BRANCH_SKILL = {"route": "structure", "page": "web-app", "api": "fullstack", "review": "verify"}
+_BRANCH_SKILLS = {
+    "route": ("structure",),
+    "page": ("web-app",),
+    "api": ("fullstack",),
+    "review": ("engineering", "interface"),
+}
 
 
 @dataclass(frozen=True)
@@ -117,21 +122,25 @@ def load_rules() -> tuple[Rule, ...]:
 
 
 def coaching_for(task: str, agent: str = "build") -> str:
-    """Return the shared rules and the skills for this turn. A branch loads one skill."""
-    if agent in _BRANCH_SKILL:
-        selected = [skill for skill in SKILLS if skill.name == _BRANCH_SKILL[agent]]
-    else:
-        selected = select_skills(task)
+    """Return the shared rules and the skills for this turn. A branch loads its own skills."""
+    names = _BRANCH_SKILLS.get(agent)
+    if names:
+        selected = [skill for name in names for skill in SKILLS if skill.name == name]
+        return _format_coaching(selected, bodies=True)
+    return _format_coaching(select_skills(task), bodies=False)
+
+
+def _format_coaching(selected: list[Skill], bodies: bool) -> str:
     if not selected:
         return ""
     names = ", ".join(skill.name for skill in selected)
-    lines = [
-        f"Active skills: {names}",
-        "Ask the skill tool for a skill body before you rely on it.",
-        f"Rules: {always_rule_text()}",
-    ]
+    lines = [f"Active skills: {names}", f"Rules: {always_rule_text()}"]
+    if not bodies:
+        lines.insert(1, "Ask the skill tool for a skill body before you rely on it.")
     for skill in selected:
         lines.append(f"{skill.name}: {skill.description}")
+        if bodies and skill.body:
+            lines.append(skill.body)
     return "\n".join(lines)
 
 

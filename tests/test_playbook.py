@@ -2,7 +2,7 @@ from codeharness.config import HarnessConfig
 from codeharness.context import SYSTEM_PROMPT, build_context
 from codeharness.agents import AGENTS
 from codeharness.playbook import SKILLS, coaching_for, select_skills
-from codeharness.web_prompt import apply_web_choice, offer_web_gui
+from codeharness.web_prompt import apply_kind, apply_web_choice, kind_question, offer_web_gui
 from codeharness.session import StoredMessage
 
 
@@ -75,6 +75,15 @@ def test_web_and_java_skills_match_their_stacks() -> None:
     assert not offer_web_gui("fix the bug")
     assert "index.html" in apply_web_choice("build an atm", True)
     assert "Do not create a website." in apply_web_choice("build an atm", False)
+    clock = kind_question("build a clock")
+    mom = kind_question("lets build your mom")
+    assert "clock" in clock.lower() or "desktop" in clock.lower()
+    assert clock != mom
+    assert "website" in mom
+    assert kind_question("build a react dashboard") == ""
+    assert "server.py" in apply_kind("build an atm", "a website")
+    assert "Do not create a website." in apply_kind("build an atm", "a desktop app")
+    assert "described:" in apply_kind("build an atm", "how should i know")
 
 
 def test_a_branch_loads_one_skill() -> None:
