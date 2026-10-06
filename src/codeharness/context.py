@@ -19,6 +19,8 @@ SYSTEM_PROMPT = (
     "Do not paste source code in the final answer. Name the file path and whether the check passed. "
     "Do not repeat a tool call that failed. "
     "Call a tool when you need one. Do not print a JSON tool call as the answer. "
+    "If the user is greeting you or chatting, answer in text and do not call a tool. "
+    "Do not invent a program from a greeting. "
     "Launch the project only when the user asks to launch, run, or start it."
 )
 

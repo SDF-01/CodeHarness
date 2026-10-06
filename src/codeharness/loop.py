@@ -170,6 +170,12 @@ def _run_turn(
                 body=_ollama_body(config, completion, step_usage),
             ),
         )
+        if not schemas and completion.tool_calls:
+            text = (completion.content or "").strip() or "Say what you want built."
+            store.append(session, StoredMessage(role="assistant", content=text))
+            _emit(on_event, LoopEvent("answer", f"agent: {text}", title="Result", body=text))
+            _emit(on_event, LoopEvent("tokens", format_usage(usage, prefix="turn tokens")))
+            return TurnResult(text=text, usage=usage, session_id=session.id)
         if not completion.tool_calls:
             problems = "" if agent_name in {"general", "review", "explore", "plan"} else review_paths(written)
             if problems:
@@ -223,6 +229,9 @@ def _run_turn(
         pending = list(completion.tool_calls)
         cursor = 0
         while cursor < len(pending):
+            stopped = _user_stopped(gate, store, session, on_event, usage)
+            if stopped is not None:
+                return stopped
             if _parallel_batch(pending, cursor):
                 batch: list[ToolCall] = []
                 while cursor < len(pending) and _can_parallel(pending[cursor]):
@@ -259,6 +268,9 @@ def _run_turn(
             signature = _signature(call)
             if _is_repeated_call(history, signature, config.doom_repeat_limit):
                 if not gate.allow("doom_loop", detail):
+                    stopped = _user_stopped(gate, store, session, on_event, usage)
+                    if stopped is not None:
+                        return stopped
                     _record(
                         store,
                         session,
@@ -284,6 +296,9 @@ def _run_turn(
                 )
                 continue
             if not gate.allow(call.name, detail):
+                stopped = _user_stopped(gate, store, session, on_event, usage)
+                if stopped is not None:
+                    return stopped
                 _record(
                     store,
                     session,
@@ -319,10 +334,30 @@ def _run_turn(
                 title=f"Tool {call.name}",
                 body=tool_card(call.name, call.arguments, result),
             )
+        stopped = _user_stopped(gate, store, session, on_event, usage)
+        if stopped is not None:
+            return stopped
         if _should_check(user_text, written, wrote_code, config):
             _run_check(store, session, config, on_event)
 
     text = f"Stopped after {config.max_steps} steps. The task is not finished."
+    store.append(session, StoredMessage(role="assistant", content=text))
+    _emit(on_event, LoopEvent("answer", f"agent: {text}", title="Result", body=text))
+    _emit(on_event, LoopEvent("tokens", format_usage(usage, prefix="turn tokens")))
+    return TurnResult(text=text, usage=usage, session_id=session.id)
+
+
+def _user_stopped(
+    gate: PermissionGate,
+    store: SessionStore,
+    session: Session,
+    on_event: EventHandler | None,
+    usage: Usage,
+) -> TurnResult | None:
+    """A sentence at the approval prompt ends the turn. A plain no does not."""
+    if not gate.halt:
+        return None
+    text = "Stopped. Say what you want built."
     store.append(session, StoredMessage(role="assistant", content=text))
     _emit(on_event, LoopEvent("answer", f"agent: {text}", title="Result", body=text))
     _emit(on_event, LoopEvent("tokens", format_usage(usage, prefix="turn tokens")))
@@ -350,6 +385,8 @@ def _preflight(
     signature = _signature(call)
     if _is_repeated_call(history, signature, config.doom_repeat_limit):
         if not gate.allow("doom_loop", detail):
+            if gate.halt:
+                return False
             _record(
                 store,
                 session,
@@ -362,6 +399,8 @@ def _preflight(
             )
             return False
     if not gate.allow(call.name, detail):
+        if gate.halt:
+            return False
         _record(
             store,
             session,

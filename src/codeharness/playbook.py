@@ -172,6 +172,27 @@ def _language_hits(name: str, words: set[str], text: str) -> int:
     return hits
 
 
+_GREETING = re.compile(
+    r"^(?:hi|hey|hello|yo|sup|thanks|thank you|ok|okay|cool|lol|"
+    r"what'?s up|whats up|what up|wassup|how are you|"
+    r"good morning|good evening|good night)\b"
+)
+_TASK = re.compile(
+    r"\b(build|create|make|design|fix|change|edit|update|add|remove|delete|"
+    r"run|launch|write|implement|refactor|compile)\b"
+)
+
+
+def is_chat(text: str) -> bool:
+    """A greeting is talk. A request to build or change a file is work."""
+    lowered = " ".join(text.strip().lower().split())
+    if not lowered or _TASK.search(lowered):
+        return False
+    if re.search(r"\b[\w.-]+\.[a-z0-9]{1,5}\b", lowered):
+        return False
+    return _GREETING.match(lowered) is not None
+
+
 def prompt_addons(
     task: str,
     project_root: Path,
@@ -181,6 +202,11 @@ def prompt_addons(
 ) -> str:
     """Text added under the base system prompt. At most four skills are included."""
     parts: list[str] = []
+    if is_chat(task):
+        parts.append(
+            "This message is conversation. Answer in one or two sentences. "
+            "Do not call tools. Do not create, edit, or open files."
+        )
     coaching = coaching_for(task, agent)
     if coaching:
         parts.append(coaching)

@@ -19,3 +19,7 @@ class ToolInputError(HarnessError):
 
 class PathEscape(HarnessError):
     """A tool path resolved outside the project root."""
+
+
+class TurnStopped(HarnessError):
+    """The user answered an approval with a sentence, so the turn ends."""

@@ -1,7 +1,7 @@
 from io import StringIO
 
 from codeharness.config import HarnessConfig
-from codeharness.display import Console, approval_sentence, format_status, progress_line
+from codeharness.display import Console, approval_choice, approval_sentence, format_status, progress_line
 from codeharness.loop import LoopEvent, run_turn
 from codeharness.model import Completion, ToolCall
 from codeharness.session import SessionStore, database_path
@@ -123,3 +123,19 @@ def test_repo_map_stays_off_the_screen() -> None:
 def test_approval_names_the_file_not_the_tool() -> None:
     assert approval_sentence("write_file", "atm_gui.py") == "Create atm_gui.py?"
     assert approval_sentence("shell", 'python atm_gui.py') == "Open atm_gui.py in a window?"
+
+
+def test_a_sentence_is_not_a_yes_or_a_no() -> None:
+    assert approval_choice("y") == "yes"
+    assert approval_choice("no") == "no"
+    assert approval_choice("what needs a yes") == "stop"
+    assert approval_choice("you dont even know what youre building") == "stop"
+
+
+def test_a_tool_name_is_not_a_progress_line() -> None:
+    buffer = StringIO()
+    view = Console(out=buffer, color=False)
+    view.event(LoopEvent("tool", "todo", title="Tool todo", body="todo\nNo todos."))
+    text = buffer.getvalue()
+    assert "todo" not in text
+    assert "Working" not in text

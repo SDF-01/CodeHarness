@@ -9,6 +9,7 @@ from typing import TextIO
 
 from codeharness.catalog import skill_catalog, skill_count, tool_catalog, tool_count
 from codeharness.config import HarnessConfig
+from codeharness.errors import TurnStopped
 from codeharness.loop import LoopEvent
 
 _GOLD = "#FFD700"
@@ -284,6 +285,8 @@ class Console:
             self.block("Result", _plain_problem(body))
             return
         first = body.strip().splitlines()[0] if body.strip() else "Done"
+        if first == first.lower() and " " not in first:
+            return
         self._status_once("Working", first[:120])
 
     def block(self, title: str, body: str) -> None:
@@ -317,7 +320,12 @@ class Console:
         except EOFError:
             self._write("")
             return False
-        return answer.strip().lower() in {"y", "yes"}
+        choice = approval_choice(answer)
+        if choice == "yes":
+            return True
+        if choice == "stop":
+            raise TurnStopped(answer.strip())
+        return False
 
     def read_prompt(self) -> str:
         return input(self._glyph())
@@ -508,6 +516,16 @@ def _fit(text: str, width: int) -> str:
     if width <= 3:
         return text[:width]
     return text[: width - 3] + "..."
+
+
+def approval_choice(answer: str) -> str:
+    """Yes allows the step. No skips it. Any other sentence stops the turn."""
+    lowered = " ".join(answer.strip().lower().split())
+    if lowered in {"y", "yes"}:
+        return "yes"
+    if lowered in {"n", "no", ""}:
+        return "no"
+    return "stop"
 
 
 def approval_sentence(tool_name: str, detail: str) -> str:

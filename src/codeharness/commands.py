@@ -13,6 +13,7 @@ from codeharness.loop import EventHandler, LoopEvent, run_turn
 from codeharness.repomap import repo_map
 from codeharness.model import ChatModel
 from codeharness.permissions import AskFunc
+from codeharness.playbook import is_chat
 from codeharness.projects import assign_project, is_tweak
 from codeharness.review import brief_report
 from codeharness.run import compile_and_launch, is_run_command
@@ -20,6 +21,7 @@ from codeharness.session import Session, SessionStore
 from codeharness.snapshot import capture, restore
 from codeharness.stack import expects_stack
 from codeharness.todos import open_todos
+from codeharness.tools import TOOLS
 from codeharness.web_prompt import apply_kind, kind_question, task_kind
 
 _EMPTY_PLAN = "The model returned an empty reply."
@@ -48,6 +50,21 @@ def handle_turn(
             else "Build mode. I can create and edit files."
         )
         _emit(on_event, LoopEvent("answer", message, title="Result", body=message))
+        return 0
+    if is_chat(lowered):
+        run_turn(
+            store=store,
+            session=session,
+            user_text=text,
+            model=model,
+            config=_chat_config(config),
+            ask=ask,
+            on_event=on_event,
+            note=(
+                "This message is conversation. Answer in one or two sentences. "
+                "Do not call tools. Do not create, edit, or open files."
+            ),
+        )
         return 0
     config, notice = assign_project(store, session, text, config)
     if notice:
@@ -176,6 +193,13 @@ def _follow_up(text: str, notice: str, config: HarnessConfig) -> tuple[str, Harn
         + "Use edit_file unless the file is missing."
     )
     return note, _edits_only(config)
+
+
+def _chat_config(config: HarnessConfig) -> HarnessConfig:
+    """A greeting gets no tools, so the model cannot create or open a file."""
+    permissions = {name: "deny" for name in TOOLS}
+    permissions["doom_loop"] = "deny"
+    return replace(config, permissions=permissions)
 
 
 def _edits_only(config: HarnessConfig) -> HarnessConfig:

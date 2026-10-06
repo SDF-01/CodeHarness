@@ -1,5 +1,6 @@
 from codeharness.commands import handle_turn
 from codeharness.config import HarnessConfig
+from codeharness.errors import TurnStopped
 from codeharness.model import Completion, ToolCall
 from codeharness.session import SessionStore, database_path
 from tests.fakes import ScriptedModel
@@ -257,3 +258,74 @@ def test_an_empty_route_does_not_start_branches(tmp_path) -> None:
     assert model.steps[0].content == "should not run"
     assert any("Branches did not start" in text for text in events)
     assert not (tmp_path / "projects" / "full-stack-notes" / "index.html").exists()
+
+
+def test_a_greeting_cannot_create_a_file(tmp_path) -> None:
+    model = ScriptedModel(
+        [
+            Completion(
+                content="",
+                tool_calls=[
+                    ToolCall(id="w1", name="write_file", arguments={"path": "main.py", "content": "print(1)\n"})
+                ],
+                prompt_tokens=1,
+                completion_tokens=1,
+            ),
+            Completion(content="should not run", tool_calls=[], prompt_tokens=1, completion_tokens=1),
+        ]
+    )
+    store = SessionStore(database_path(tmp_path))
+    session = store.create(tmp_path)
+    events: list[str] = []
+    handle_turn(
+        store,
+        session,
+        "what up g",
+        model,
+        HarnessConfig(project_root=tmp_path, model="test"),
+        ask=lambda name, detail: True,
+        on_event=lambda event: events.append(event.body or event.text),
+    )
+    text = "\n".join(message.content for message in session.messages)
+    store.close()
+    assert model.seen_tools[0] == []
+    assert not (tmp_path / "main.py").exists()
+    assert "Say what you want built." in text
+    assert any("Say what you want built." in item for item in events)
+
+
+def test_a_sentence_at_approval_stops_the_turn(tmp_path) -> None:
+    def ask(name, detail):
+        raise TurnStopped("you dont even know what youre building")
+
+    model = ScriptedModel(
+        [
+            Completion(
+                content="",
+                tool_calls=[
+                    ToolCall(id="w1", name="write_file", arguments={"path": "main.py", "content": "print(1)\n"}),
+                    ToolCall(id="s1", name="shell", arguments={"command": "python main.py"}),
+                ],
+                prompt_tokens=1,
+                completion_tokens=1,
+            ),
+            Completion(content="should not run", tool_calls=[], prompt_tokens=1, completion_tokens=1),
+        ]
+    )
+    store = SessionStore(database_path(tmp_path))
+    session = store.create(tmp_path)
+    events: list[str] = []
+    handle_turn(
+        store,
+        session,
+        "fix the menu",
+        model,
+        HarnessConfig(project_root=tmp_path, model="test"),
+        ask=ask,
+        on_event=lambda event: events.append(event.body or event.text),
+    )
+    store.close()
+    assert not (tmp_path / "main.py").exists()
+    assert model.steps[0].content == "should not run"
+    assert any("Stopped. Say what you want built." in item for item in events)
+    assert not any("Denied." in item for item in events)
