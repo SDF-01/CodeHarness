@@ -8,6 +8,7 @@ from pathlib import Path
 from codeharness.catalog import skill_catalog, skill_count, tool_catalog, tool_count
 from codeharness.config import HarnessConfig
 from codeharness.context import estimate_messages
+from codeharness.errors import TurnStopped
 from codeharness.lead import is_lead_task, lead_stack, run_lead
 from codeharness.loop import EventHandler, LoopEvent, run_turn
 from codeharness.repomap import repo_map
@@ -20,6 +21,7 @@ from codeharness.run import compile_and_launch, is_run_command
 from codeharness.session import Session, SessionStore
 from codeharness.snapshot import capture, restore
 from codeharness.stack import expects_stack
+from codeharness.taskrecord import begin_task, settle_task
 from codeharness.todos import open_todos
 from codeharness.tools import TOOLS
 from codeharness.web_prompt import apply_kind, kind_question, task_kind
@@ -36,6 +38,50 @@ def handle_turn(
     ask: AskFunc,
     on_event: EventHandler | None = None,
     reply=None,
+    choose=None,
+    _depth: int = 0,
+) -> int:
+    try:
+        return _handle_turn(store, session, text, model, config, ask, on_event, reply, choose)
+    except TurnStopped as stopped:
+        request = str(stopped).strip()
+        if _depth >= 1 or not request or request == "stop":
+            message = "Stopped. Say what you want built."
+            _emit(on_event, LoopEvent("answer", message, title="Result", body=message))
+            return 0
+        _emit(
+            on_event,
+            LoopEvent(
+                "status",
+                "Using that as the request.",
+                title="Working",
+                body="Using that as the request.",
+            ),
+        )
+        return handle_turn(
+            store,
+            session,
+            request,
+            model,
+            config,
+            ask,
+            on_event,
+            reply,
+            choose,
+            _depth + 1,
+        )
+
+
+def _handle_turn(
+    store: SessionStore,
+    session: Session,
+    text: str,
+    model: ChatModel,
+    config: HarnessConfig,
+    ask: AskFunc,
+    on_event: EventHandler | None = None,
+    reply=None,
+    choose=None,
 ) -> int:
     lowered = " ".join(text.strip().lower().split())
     if lowered.startswith("/"):
@@ -66,7 +112,10 @@ def handle_turn(
             ),
         )
         return 0
-    config, notice = assign_project(store, session, text, config)
+    config, notice = assign_project(store, session, text, config, choose)
+    if notice == "No folder chosen.":
+        _emit(on_event, LoopEvent("answer", notice, title="Result", body=notice))
+        return 0
     if notice:
         _emit(on_event, LoopEvent("status", notice, title="Harness", body=notice))
     if is_run_command(text):
@@ -78,9 +127,13 @@ def handle_turn(
         return run_lead(store, session, text, model, config, ask, on_event, reply)
     chosen = _with_web_choice(text, on_event, reply)
     if expects_stack(chosen):
-        return lead_stack(store, session, chosen, model, config, ask, on_event)
+        begin_task(config.project_root, chosen)
+        code = lead_stack(store, session, chosen, model, config, ask, on_event)
+        _settle(config.project_root, session)
+        return code
     note, turn_config = _follow_up(text, notice, config)
-    run_turn(
+    begin_task(config.project_root, chosen)
+    result = run_turn(
         store=store,
         session=session,
         user_text=chosen,
@@ -90,7 +143,13 @@ def handle_turn(
         on_event=on_event,
         note=note,
     )
+    settle_task(config.project_root, result.text, result.checks)
     return 0
+
+
+def _settle(root: Path, session: Session) -> None:
+    text = session.messages[-1].content if session.messages else ""
+    settle_task(root, text)
 
 
 def handoff_task(text: str) -> str | None:
@@ -119,8 +178,11 @@ def handoff(
         _emit(on_event, LoopEvent("answer", message, title="Result", body=message))
         return 0
     task = _with_web_choice(task, on_event, reply)
+    begin_task(config.project_root, task)
     if expects_stack(task):
-        return lead_stack(store, session, task, model, config, ask, on_event)
+        code = lead_stack(store, session, task, model, config, ask, on_event)
+        _settle(config.project_root, session)
+        return code
     store.set_agent(session, "plan")
     _emit(on_event, LoopEvent("status", "Planning. Files stay unchanged.", title="Harness", body="Planning. Files stay unchanged."))
     plan = run_turn(
@@ -135,10 +197,11 @@ def handoff(
     if _plan_is_empty(plan.text):
         message = "The plan was empty. Build did not start."
         _emit(on_event, LoopEvent("answer", message, title="Result", body=message))
+        settle_task(config.project_root, message, ["failed: the plan was empty"])
         return 0
     store.set_agent(session, "build")
     _emit(on_event, LoopEvent("status", "Building from the plan.", title="Harness", body="Building from the plan."))
-    run_turn(
+    built = run_turn(
         store=store,
         session=session,
         user_text=f"Implement this plan:\n{plan.text}",
@@ -147,6 +210,7 @@ def handoff(
         ask=ask,
         on_event=on_event,
     )
+    settle_task(config.project_root, built.text, built.checks)
     return 0
 
 

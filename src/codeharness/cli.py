@@ -109,7 +109,17 @@ def _chat(args: argparse.Namespace) -> int:
 
 def _one_turn(store, session, text: str, model, config: HarnessConfig, view: Console) -> int:
     view.prompt_block(text)
-    return handle_turn(store, session, text, model, config, view.ask, view.event, reply=view.ask_text)
+    return handle_turn(
+        store,
+        session,
+        text,
+        model,
+        config,
+        view.ask,
+        view.event,
+        reply=view.ask_text,
+        choose=view.choose_folder,
+    )
 
 
 def _eval(args: argparse.Namespace) -> int:

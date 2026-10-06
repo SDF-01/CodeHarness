@@ -24,7 +24,7 @@ class PermissionGate:
         if rule == "ask":
             try:
                 return self._ask(tool_name, detail)
-            except TurnStopped:
-                self.halt = "stop"
+            except TurnStopped as stopped:
+                self.halt = str(stopped).strip() or "stop"
                 return False
         raise ConfigError(f"unknown permission rule for {tool_name}: {rule}")

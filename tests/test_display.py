@@ -1,7 +1,15 @@
 from io import StringIO
+from pathlib import Path
 
 from codeharness.config import HarnessConfig
-from codeharness.display import Console, approval_choice, approval_sentence, format_status, progress_line
+from codeharness.display import (
+    Console,
+    approval_choice,
+    approval_sentence,
+    folder_choice,
+    format_status,
+    progress_line,
+)
 from codeharness.loop import LoopEvent, run_turn
 from codeharness.model import Completion, ToolCall
 from codeharness.session import SessionStore, database_path
@@ -123,6 +131,15 @@ def test_repo_map_stays_off_the_screen() -> None:
 def test_approval_names_the_file_not_the_tool() -> None:
     assert approval_sentence("write_file", "atm_gui.py") == "Create atm_gui.py?"
     assert approval_sentence("shell", 'python atm_gui.py') == "Open atm_gui.py in a window?"
+
+
+def test_folder_choice_picks_a_number_or_the_new_folder(tmp_path) -> None:
+    existing = tmp_path / "projects" / "atm"
+    assert folder_choice("", [existing], "your-mom") == Path("your-mom")
+    assert folder_choice("1", [existing], "your-mom") == existing
+    assert folder_choice("2", [existing], "your-mom") == Path("your-mom")
+    assert folder_choice("9", [existing], "your-mom") is None
+    assert progress_line("Using that as the request.") == "Using that as the request."
 
 
 def test_a_sentence_is_not_a_yes_or_a_no() -> None:

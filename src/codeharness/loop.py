@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -12,6 +13,7 @@ from codeharness.agents import config_for_agent
 from codeharness.cards import tool_card
 from codeharness.config import HarnessConfig
 from codeharness.context import build_context, estimate_messages, estimate_tokens
+from codeharness.errors import TurnStopped
 from codeharness.languages import language_of
 from codeharness.model import ChatModel, Completion, ToolCall
 from codeharness.permissions import AskFunc, PermissionGate
@@ -51,6 +53,7 @@ class TurnResult:
     text: str
     usage: Usage = field(default_factory=Usage)
     session_id: str = ""
+    checks: list[str] = field(default_factory=list)
 
 
 EventHandler = Callable[[LoopEvent], None]
@@ -121,6 +124,7 @@ def _run_turn(
     shell_problem = ""
     advice_sent = False
     paste_sent = False
+    checks: list[str] = []
 
     for _step in range(config.max_steps):
         built = build_context(
@@ -129,6 +133,7 @@ def _run_turn(
             lessons=store.lessons(session),
             agent=agent_name,
             note=note,
+            tools=schemas,
         )
         _emit(
             on_event,
@@ -175,7 +180,7 @@ def _run_turn(
             store.append(session, StoredMessage(role="assistant", content=text))
             _emit(on_event, LoopEvent("answer", f"agent: {text}", title="Result", body=text))
             _emit(on_event, LoopEvent("tokens", format_usage(usage, prefix="turn tokens")))
-            return TurnResult(text=text, usage=usage, session_id=session.id)
+            return TurnResult(text=text, usage=usage, session_id=session.id, checks=list(checks))
         if not completion.tool_calls:
             problems = "" if agent_name in {"general", "review", "explore", "plan"} else review_paths(written)
             if problems:
@@ -202,7 +207,7 @@ def _run_turn(
                 continue
             runtime_problem = ""
             if agent_name not in {"general", "review", "explore", "plan"}:
-                runtime_problem = _runtime_pending(written, config.project_root)
+                runtime_problem = _runtime_pending(written, config.project_root, checks)
             if runtime_problem:
                 _remember(store, session, runtime_problem)
                 _send_back(store, session, "Run failed.", runtime_problem, on_event)
@@ -215,7 +220,7 @@ def _run_turn(
             store.append(session, StoredMessage(role="assistant", content=text))
             _emit(on_event, LoopEvent("answer", f"agent: {text}", title="Result", body=text))
             _emit(on_event, LoopEvent("tokens", format_usage(usage, prefix="turn tokens")))
-            return TurnResult(text=text, usage=usage, session_id=session.id)
+            return TurnResult(text=text, usage=usage, session_id=session.id, checks=list(checks))
 
         store.append(
             session,
@@ -228,115 +233,123 @@ def _run_turn(
         wrote_code = False
         pending = list(completion.tool_calls)
         cursor = 0
-        while cursor < len(pending):
-            stopped = _user_stopped(gate, store, session, on_event, usage)
-            if stopped is not None:
-                return stopped
-            if _parallel_batch(pending, cursor):
-                batch: list[ToolCall] = []
-                while cursor < len(pending) and _can_parallel(pending[cursor]):
-                    batch.append(pending[cursor])
-                    cursor += 1
-                ready: list[ToolCall] = []
-                for call in batch:
-                    if _preflight(call, history, config, gate, store, session, on_event):
-                        ready.append(call)
-                        history.append(_signature(call))
-                if len(ready) > 1:
-                    with ThreadPoolExecutor(max_workers=len(ready)) as pool:
-                        results = list(pool.map(lambda item: _execute(item, config), ready))
-                else:
-                    results = [_execute(item, config) for item in ready]
-                for call, result in zip(ready, results):
-                    if _note_write(call, result, config, written):
-                        wrote_code = True
-                    label = f"tool: {call.name} {_tool_detail(call)}".rstrip()
+        try:
+            while cursor < len(pending):
+                _user_stopped(gate)
+                if _parallel_batch(pending, cursor):
+                    batch: list[ToolCall] = []
+                    while cursor < len(pending) and _can_parallel(pending[cursor]):
+                        batch.append(pending[cursor])
+                        cursor += 1
+                    ready: list[ToolCall] = []
+                    for call in batch:
+                        if _preflight(call, history, config, gate, store, session, on_event):
+                            ready.append(call)
+                            history.append(_signature(call))
+                    if len(ready) > 1:
+                        with ThreadPoolExecutor(max_workers=len(ready)) as pool:
+                            results = list(pool.map(lambda item: _execute(item, config), ready))
+                    else:
+                        results = [_execute(item, config) for item in ready]
+                    for call, result in zip(ready, results):
+                        if _note_write(call, result, config, written):
+                            wrote_code = True
+                        label = f"tool: {call.name} {_tool_detail(call)}".rstrip()
+                        _record(
+                            store,
+                            session,
+                            call,
+                            result,
+                            on_event,
+                            label,
+                            title=f"Tool {call.name}",
+                            body=tool_card(call.name, call.arguments, result),
+                        )
+                    continue
+                call = pending[cursor]
+                cursor += 1
+                detail = _tool_detail(call)
+                signature = _signature(call)
+                if _missing_script(call, config):
                     _record(
                         store,
                         session,
                         call,
-                        result,
+                        "error: that file is not there yet",
                         on_event,
-                        label,
+                        "that file is not there yet",
                         title=f"Tool {call.name}",
-                        body=tool_card(call.name, call.arguments, result),
-                    )
-                continue
-            call = pending[cursor]
-            cursor += 1
-            detail = _tool_detail(call)
-            signature = _signature(call)
-            if _is_repeated_call(history, signature, config.doom_repeat_limit):
-                if not gate.allow("doom_loop", detail):
-                    stopped = _user_stopped(gate, store, session, on_event, usage)
-                    if stopped is not None:
-                        return stopped
-                    _record(
-                        store,
-                        session,
-                        call,
-                        "error: this repeated tool call was stopped",
-                        on_event,
-                        f"denied: repeated {call.name} was stopped",
-                        title=f"Tool {call.name}",
-                        body="Denied. This repeated call was stopped.",
+                        body="That file is not there yet.",
                     )
                     continue
-            if call.parse_error:
+                if _is_repeated_call(history, signature, config.doom_repeat_limit):
+                    if not gate.allow("doom_loop", detail):
+                        _user_stopped(gate)
+                        _record(
+                            store,
+                            session,
+                            call,
+                            "error: this repeated tool call was stopped",
+                            on_event,
+                            f"denied: repeated {call.name} was stopped",
+                            title=f"Tool {call.name}",
+                            body="Denied. This repeated call was stopped.",
+                        )
+                        continue
+                if call.parse_error:
+                    history.append(signature)
+                    _record(
+                        store,
+                        session,
+                        call,
+                        f"error: {call.parse_error}",
+                        on_event,
+                        f"tool: {call.name} invalid arguments",
+                        title=f"Tool {call.name}",
+                        body=f"Input\n{_format_arguments(call)}\nOutput\nerror: {call.parse_error}",
+                    )
+                    continue
+                if not gate.allow(call.name, detail):
+                    _user_stopped(gate)
+                    _record(
+                        store,
+                        session,
+                        call,
+                        f"error: {call.name} was denied",
+                        on_event,
+                        f"denied: {call.name} was denied",
+                        title=f"Tool {call.name}",
+                        body="Denied. The harness did not run this tool.",
+                    )
+                    continue
+                result = _execute(call, config)
+                if _note_write(call, result, config, written):
+                    wrote_code = True
+                if call.name == "shell":
+                    if result.startswith("Opened "):
+                        opened.add(_opened_name(result))
+                        shell_problem = ""
+                    elif _command_failed(result):
+                        shell_problem = result
+                        _remember(store, session, result)
+                    else:
+                        shell_problem = ""
                 history.append(signature)
+                label = f"tool: {call.name} {detail}".rstrip()
                 _record(
                     store,
                     session,
                     call,
-                    f"error: {call.parse_error}",
+                    result,
                     on_event,
-                    f"tool: {call.name} invalid arguments",
+                    label,
                     title=f"Tool {call.name}",
-                    body=f"Input\n{_format_arguments(call)}\nOutput\nerror: {call.parse_error}",
+                    body=tool_card(call.name, call.arguments, result),
                 )
-                continue
-            if not gate.allow(call.name, detail):
-                stopped = _user_stopped(gate, store, session, on_event, usage)
-                if stopped is not None:
-                    return stopped
-                _record(
-                    store,
-                    session,
-                    call,
-                    f"error: {call.name} was denied",
-                    on_event,
-                    f"denied: {call.name} was denied",
-                    title=f"Tool {call.name}",
-                    body="Denied. The harness did not run this tool.",
-                )
-                continue
-            result = _execute(call, config)
-            if _note_write(call, result, config, written):
-                wrote_code = True
-            if call.name == "shell":
-                if result.startswith("Opened "):
-                    opened.add(_opened_name(result))
-                    shell_problem = ""
-                elif _command_failed(result):
-                    shell_problem = result
-                    _remember(store, session, result)
-                else:
-                    shell_problem = ""
-            history.append(signature)
-            label = f"tool: {call.name} {detail}".rstrip()
-            _record(
-                store,
-                session,
-                call,
-                result,
-                on_event,
-                label,
-                title=f"Tool {call.name}",
-                body=tool_card(call.name, call.arguments, result),
-            )
-        stopped = _user_stopped(gate, store, session, on_event, usage)
-        if stopped is not None:
-            return stopped
+            _user_stopped(gate)
+        except TurnStopped:
+            _close_pending(store, session, pending)
+            raise
         if _should_check(user_text, written, wrote_code, config):
             _run_check(store, session, config, on_event)
 
@@ -344,24 +357,46 @@ def _run_turn(
     store.append(session, StoredMessage(role="assistant", content=text))
     _emit(on_event, LoopEvent("answer", f"agent: {text}", title="Result", body=text))
     _emit(on_event, LoopEvent("tokens", format_usage(usage, prefix="turn tokens")))
-    return TurnResult(text=text, usage=usage, session_id=session.id)
+    return TurnResult(text=text, usage=usage, session_id=session.id, checks=list(checks))
 
 
-def _user_stopped(
-    gate: PermissionGate,
-    store: SessionStore,
-    session: Session,
-    on_event: EventHandler | None,
-    usage: Usage,
-) -> TurnResult | None:
-    """A sentence at the approval prompt ends the turn. A plain no does not."""
-    if not gate.halt:
-        return None
-    text = "Stopped. Say what you want built."
-    store.append(session, StoredMessage(role="assistant", content=text))
-    _emit(on_event, LoopEvent("answer", f"agent: {text}", title="Result", body=text))
-    _emit(on_event, LoopEvent("tokens", format_usage(usage, prefix="turn tokens")))
-    return TurnResult(text=text, usage=usage, session_id=session.id)
+def _user_stopped(gate: PermissionGate) -> None:
+    """A sentence at the approval prompt becomes the next request. A plain no does not."""
+    if gate.halt:
+        raise TurnStopped(gate.halt)
+
+
+def _close_pending(store: SessionStore, session: Session, pending: list[ToolCall]) -> None:
+    """Close tool calls the model already sent so the next request stays valid."""
+    seen = {message.tool_call_id for message in session.messages if message.role == "tool"}
+    for call in pending:
+        if call.id in seen:
+            continue
+        store.append(
+            session,
+            StoredMessage(
+                role="tool",
+                content="The user changed the request.",
+                tool_call_id=call.id,
+                tool_name=call.name,
+            ),
+        )
+
+
+_PY_FILE = re.compile(r"([A-Za-z0-9_\-./\\]+\.py)")
+
+
+def _missing_script(call: ToolCall, config: HarnessConfig) -> bool:
+    """True when a shell command names a Python file that is not on disk."""
+    if call.name != "shell":
+        return False
+    command = str(call.arguments.get("command") or "")
+    match = _PY_FILE.search(command)
+    if match is None:
+        return False
+    raw = Path(match.group(1))
+    path = raw if raw.is_absolute() else config.project_root / raw
+    return not path.is_file()
 
 
 def _can_parallel(call: ToolCall) -> bool:
@@ -456,7 +491,9 @@ def _launch_pending(paths: list[Path], opened: set[str], config: HarnessConfig) 
     return ""
 
 
-def _runtime_pending(paths: list[Path], root: Path) -> str:
+def _runtime_pending(paths: list[Path], root: Path, checks: list[str] | None = None) -> str:
+    """Run written files. A missing compiler is unverified, not a pass."""
+    recorded = checks if checks is not None else []
     for path in paths:
         if not path.is_file():
             continue
@@ -469,8 +506,16 @@ def _runtime_pending(paths: list[Path], root: Path) -> str:
             result = probe_compiled(path, root)
         else:
             continue
+        if result.startswith("unverified:"):
+            recorded.append(result)
+            continue
         if result:
             return result
+        if suffix == ".java":
+            source = path.read_text(encoding="utf-8", errors="replace")
+            if "void main" not in source:
+                continue
+        recorded.append(f"passed: ran {path.name}")
     return ""
 
 

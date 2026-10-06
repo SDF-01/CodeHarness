@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shutil
 import sys
+from pathlib import Path
 from typing import TextIO
 
 from codeharness.catalog import skill_catalog, skill_count, tool_catalog, tool_count
@@ -279,6 +280,9 @@ class Console:
         if "error:" in body or body.startswith("denied:") or body.startswith("Denied."):
             self.block("Result", _plain_problem(body))
             return
+        if body.strip() == "That file is not there yet.":
+            self.block("Result", body.strip())
+            return
         if body.startswith("Shell"):
             if "exit_code=0" in body:
                 return
@@ -329,6 +333,25 @@ class Console:
 
     def read_prompt(self) -> str:
         return input(self._glyph())
+
+    def choose_folder(self, folders: list[Path], suggested: str) -> Path | None:
+        """Ask which project folder to use. Enter accepts the new folder."""
+        width = min(max(self._width(), 48), 72)
+        line = "+" + ("-" * (width - 2)) + "+"
+        self._write(self._hex(line, _BRONZE))
+        self._write(self._hex("| Which folder?", _AMBER))
+        for index, folder in enumerate(folders, start=1):
+            self._write(self._hex(f"| {index}  projects/{folder.name}", _TEXT))
+        new_index = len(folders) + 1
+        self._write(self._hex(f"| {new_index}  New folder: projects/{suggested}", _TEXT))
+        self._write(self._hex("| Type a number. Enter makes the new folder.", _TEXT))
+        self._write(self._hex(line, _BRONZE))
+        try:
+            answer = input(self._glyph())
+        except EOFError:
+            self._write("")
+            return None
+        return folder_choice(answer, folders, suggested)
 
     def ask_text(self, prompt: str) -> str:
         width = min(max(self._width(), 48), 72)
@@ -446,6 +469,8 @@ def progress_line(body: str) -> str:
         return "Building"
     if lowered.startswith("wrote ") or lowered.startswith("queued:") or lowered.startswith("project folder:"):
         return text
+    if lowered.startswith("using that as the request"):
+        return "Using that as the request."
     if lowered.endswith("branch."):
         return text
     return ""
@@ -516,6 +541,20 @@ def _fit(text: str, width: int) -> str:
     if width <= 3:
         return text[:width]
     return text[: width - 3] + "..."
+
+
+def folder_choice(answer: str, folders: list[Path], suggested: str) -> Path | None:
+    """Turn a folder-box answer into a path. Enter selects the new folder."""
+    cleaned = answer.strip()
+    new_index = len(folders) + 1
+    if not cleaned or cleaned == str(new_index):
+        return Path(suggested)
+    if cleaned.isdigit():
+        number = int(cleaned)
+        if 1 <= number <= len(folders):
+            return folders[number - 1]
+        return None
+    return Path(cleaned)
 
 
 def approval_choice(answer: str) -> str:

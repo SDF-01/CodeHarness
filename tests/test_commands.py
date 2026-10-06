@@ -88,7 +88,7 @@ def test_a_build_asks_before_a_realistic_web_app(tmp_path) -> None:
         session,
         "build an atm",
         model,
-        HarnessConfig(project_root=tmp_path, model="test"),
+        HarnessConfig(project_root=tmp_path, model="test", open_windows=False),
         ask=ask,
         reply=lambda question: "a website",
     )
@@ -200,6 +200,7 @@ def test_a_full_stack_task_runs_separate_branches(tmp_path) -> None:
         HarnessConfig(
             project_root=tmp_path,
             model="test",
+            open_windows=False,
             permissions={**HarnessConfig().permissions, "write_file": "allow", "edit_file": "allow"},
         ),
         ask=lambda name, detail: False,
@@ -224,6 +225,9 @@ def test_a_full_stack_task_runs_separate_branches(tmp_path) -> None:
     assert (folder / "server.py").read_text(encoding="utf-8") == _SERVER
     assert "Page: wrote the page" in parent
     assert "API: wrote the api" in parent
+    assert "Health passed." in parent
+    assert "index.html" in (folder / "PLAN.md").read_text(encoding="utf-8")
+    assert "server.py" in (folder / "PLAN.md").read_text(encoding="utf-8")
     assert "fetch" not in "\n".join(item.get("content") or "" for item in api_prompt)
     assert all(item.get("role") != "tool" for item in api_prompt)
     assert "Active skills: web-app" in page_prompt[0]["content"]
@@ -294,9 +298,15 @@ def test_a_greeting_cannot_create_a_file(tmp_path) -> None:
     assert any("Say what you want built." in item for item in events)
 
 
-def test_a_sentence_at_approval_stops_the_turn(tmp_path) -> None:
+def test_a_sentence_at_approval_becomes_the_request(tmp_path) -> None:
     def ask(name, detail):
-        raise TurnStopped("you dont even know what youre building")
+        raise TurnStopped("build me your mom")
+
+    picked: list[str] = []
+
+    def choose(folders, suggested):
+        picked.append(suggested)
+        return tmp_path / "projects" / "mom-app"
 
     model = ScriptedModel(
         [
@@ -309,7 +319,52 @@ def test_a_sentence_at_approval_stops_the_turn(tmp_path) -> None:
                 prompt_tokens=1,
                 completion_tokens=1,
             ),
-            Completion(content="should not run", tool_calls=[], prompt_tokens=1, completion_tokens=1),
+            Completion(content="Ready.", tool_calls=[], prompt_tokens=1, completion_tokens=1),
+        ]
+    )
+    store = SessionStore(database_path(tmp_path))
+    session = store.create(tmp_path)
+    events: list[str] = []
+    handle_turn(
+        store,
+        session,
+        "fix the menu",
+        model,
+        HarnessConfig(project_root=tmp_path, model="test"),
+        ask=ask,
+        on_event=lambda event: events.append(event.body or event.text),
+        choose=choose,
+    )
+    text = "\n".join(message.content for message in session.messages)
+    store.close()
+    assert not (tmp_path / "main.py").exists()
+    assert picked == ["your-mom"]
+    assert (tmp_path / "projects" / "mom-app").is_dir()
+    assert "Ready." in text
+    assert any("Using that as the request." in item for item in events)
+    assert not any("Denied." in item for item in events)
+    assert not any("Open main.py" in item for item in events)
+
+
+def test_a_missing_file_is_not_opened(tmp_path) -> None:
+    asked: list[str] = []
+
+    def ask(name, detail):
+        asked.append(name)
+        return False
+
+    model = ScriptedModel(
+        [
+            Completion(
+                content="",
+                tool_calls=[
+                    ToolCall(id="w1", name="write_file", arguments={"path": "main.py", "content": "print(1)\n"}),
+                    ToolCall(id="s1", name="shell", arguments={"command": "python main.py"}),
+                ],
+                prompt_tokens=1,
+                completion_tokens=1,
+            ),
+            Completion(content="stopped", tool_calls=[], prompt_tokens=1, completion_tokens=1),
         ]
     )
     store = SessionStore(database_path(tmp_path))
@@ -325,7 +380,29 @@ def test_a_sentence_at_approval_stops_the_turn(tmp_path) -> None:
         on_event=lambda event: events.append(event.body or event.text),
     )
     store.close()
+    assert asked == ["write_file"]
+    assert any("That file is not there yet." in item for item in events)
     assert not (tmp_path / "main.py").exists()
+
+
+def test_cancelling_the_folder_box_does_not_build(tmp_path) -> None:
+    model = ScriptedModel(
+        [Completion(content="should not run", tool_calls=[], prompt_tokens=1, completion_tokens=1)]
+    )
+    store = SessionStore(database_path(tmp_path))
+    session = store.create(tmp_path)
+    events: list[str] = []
+    handle_turn(
+        store,
+        session,
+        "build a clock",
+        model,
+        HarnessConfig(project_root=tmp_path, model="test"),
+        ask=lambda name, detail: True,
+        on_event=lambda event: events.append(event.body or event.text),
+        choose=lambda folders, suggested: None,
+    )
+    store.close()
     assert model.steps[0].content == "should not run"
-    assert any("Stopped. Say what you want built." in item for item in events)
-    assert not any("Denied." in item for item in events)
+    assert any("No folder chosen." in item for item in events)
+    assert not (tmp_path / "projects" / "clock").exists()

@@ -74,11 +74,21 @@ def is_tweak(text: str) -> bool:
     return _TWEAK.match(stripped) is not None
 
 
+def project_dirs(workspace: Path) -> list[Path]:
+    """Folders already created under projects/."""
+    root = workspace / PROJECTS_DIR
+    if not root.is_dir():
+        return []
+    found = [path for path in root.iterdir() if path.is_dir() and not path.name.startswith(".")]
+    return sorted(found, key=lambda path: path.name.lower())
+
+
 def assign_project(
     store: SessionStore,
     session: Session,
     text: str,
     config: HarnessConfig,
+    choose=None,
 ) -> tuple[HarnessConfig, str]:
     """Point this turn at projects/<name>. Return a status line when the folder changes."""
     stripped = " ".join(text.strip().lower().split())
@@ -90,9 +100,19 @@ def assign_project(
 
     current = store.work_dir(session)
     if wants_new_folder(text, has_project=bool(current)):
-        folder = (config.project_root / PROJECTS_DIR / task_slug(text)).resolve()
+        slug = task_slug(text)
+        if choose is not None:
+            picked = choose(project_dirs(config.project_root), slug)
+            if picked is None:
+                return config, "No folder chosen."
+            if picked.is_absolute():
+                folder = picked
+            else:
+                folder = config.project_root / PROJECTS_DIR / picked.name
+        else:
+            folder = config.project_root / PROJECTS_DIR / slug
         folder.mkdir(parents=True, exist_ok=True)
-        return _use(store, session, config, folder)
+        return _use(store, session, config, folder.resolve())
 
     current = store.work_dir(session)
     if not current:
