@@ -53,6 +53,7 @@ def test_banner_names_the_path() -> None:
     view.banner(HarnessConfig(model="qwen2.5-coder:7b"), "abc123")
     text = buffer.getvalue()
     assert "CODEHARNESS" in text
+    assert "█" in text
     assert "Available Tools" in text
     assert "Available Skills" in text
     assert "qwen2.5-coder:7b" in text

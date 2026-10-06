@@ -17,6 +17,109 @@ _BRONZE = "#CD7F32"
 _DIM = "#B8860B"
 _TEXT = "#FFF8DC"
 
+
+def _glyph(*rows: str) -> tuple[str, ...]:
+    width = max(len(row) for row in rows)
+    return tuple(row.ljust(width) for row in rows)
+
+
+# Block letters for the startup wordmark. Same height, our own shapes.
+_LETTERS = {
+    "A": _glyph(
+        " █████╗ ",
+        "██╔══██╗",
+        "███████║",
+        "██╔══██║",
+        "██║  ██║",
+        "╚═╝  ╚═╝",
+    ),
+    "C": _glyph(
+        " ██████╗",
+        "██╔════╝",
+        "██║     ",
+        "██║     ",
+        "╚██████╗",
+        " ╚═════╝",
+    ),
+    "D": _glyph(
+        "██████╗ ",
+        "██╔══██╗",
+        "██║  ██║",
+        "██║  ██║",
+        "██████╔╝",
+        "╚═════╝ ",
+    ),
+    "E": _glyph(
+        "███████╗",
+        "██╔════╝",
+        "█████╗  ",
+        "██╔══╝  ",
+        "███████╗",
+        "╚══════╝",
+    ),
+    "H": _glyph(
+        "██╗  ██╗",
+        "██║  ██║",
+        "███████║",
+        "██╔══██║",
+        "██║  ██║",
+        "╚═╝  ╚═╝",
+    ),
+    "N": _glyph(
+        "███╗   ██╗",
+        "████╗  ██║",
+        "██╔██╗ ██║",
+        "██║╚██╗██║",
+        "██║ ╚████║",
+        "╚═╝  ╚═══╝",
+    ),
+    "O": _glyph(
+        " ██████╗ ",
+        "██╔═══██╗",
+        "██║   ██║",
+        "██║   ██║",
+        "╚██████╔╝",
+        " ╚═════╝ ",
+    ),
+    "R": _glyph(
+        "██████╗ ",
+        "██╔══██╗",
+        "██████╔╝",
+        "██╔══██╗",
+        "██║  ██║",
+        "╚═╝  ╚═╝",
+    ),
+    "S": _glyph(
+        "███████╗",
+        "██╔════╝",
+        "███████╗",
+        "╚════██║",
+        "███████║",
+        "╚══════╝",
+    ),
+}
+
+
+def _compose(word: str) -> list[str]:
+    glyphs = [_LETTERS[char] for char in word]
+    return [" ".join(glyph[row] for glyph in glyphs) for row in range(len(glyphs[0]))]
+
+
+def _center(lines: list[str], width: int) -> list[str]:
+    centered: list[str] = []
+    for line in lines:
+        pad = max(width - len(line), 0) // 2
+        centered.append((" " * pad) + line)
+    return centered
+
+
+def wordmark_lines(width: int) -> list[str]:
+    """Giant CODEHARNESS. One row when it fits, otherwise CODE over HARNESS."""
+    full = _compose("CODEHARNESS")
+    if len(full[0]) <= width:
+        return _center(full, width)
+    return _center(_compose("CODE"), width) + _center(_compose("HARNESS"), width)
+
 _MARKS = {
     "prompt": ">",
     "harness": "*",
@@ -56,11 +159,20 @@ class Console:
         self.phase = "ready"
 
     def banner(self, config: HarnessConfig, session_id: str) -> None:
-        width = max(self._width(), 48)
+        width = self._banner_width()
         version = "v0.1.0"
-        title = "CODEHARNESS"
-        gap = max(width - len(title) - len(version), 1)
-        self._write(self._hex(title + (" " * gap) + version, _GOLD))
+        if not self.color:
+            gap = max(width - len("CODEHARNESS") - len(version), 1)
+            self._write("CODEHARNESS" + (" " * gap) + version)
+        else:
+            self._write(self._hex(version.rjust(width), _GOLD))
+        art = wordmark_lines(width)
+        if self._can_encode("".join(art)):
+            for line in art:
+                self._write(self._hex(line.ljust(width), _GOLD))
+        elif self.color:
+            gap = max(width - len("CODEHARNESS") - len(version), 1)
+            self._write(self._hex("CODEHARNESS" + (" " * gap) + version, _GOLD))
         border = "+" + ("-" * (width - 2)) + "+"
         self._write(self._hex(border, _BRONZE))
         self._write(self._hex("| [==]", _BRONZE) + "  " + self._hex(config.model or "(no model)", _TEXT))
@@ -196,14 +308,23 @@ class Console:
             self._write(self._hex("| " + row, _TEXT))
         self._write(self._hex(line, _BRONZE))
         try:
-            answer = input("❯ ")
+            answer = input(self._glyph())
         except EOFError:
             self._write("")
             return False
         return answer.strip().lower() in {"y", "yes"}
 
     def read_prompt(self) -> str:
-        return input("❯ ")
+        return input(self._glyph())
+
+    def _glyph(self) -> str:
+        glyph = "❯ "
+        encoding = getattr(self.out, "encoding", None) or "utf-8"
+        try:
+            glyph.encode(encoding)
+        except UnicodeEncodeError:
+            return "> "
+        return glyph
 
     def _note_tokens(self, text: str) -> None:
         if "prompt=" not in text:
@@ -215,6 +336,18 @@ class Console:
         self.estimated = "source=estimated" in text
         if "thinking" not in self.phase:
             self.phase = "running" if "tool_calls=" in text and not text.split("tool_calls=", 1)[-1].startswith("0") else "thinking"
+
+    def _banner_width(self) -> int:
+        columns = shutil.get_terminal_size((120, 24)).columns
+        return min(max(columns, 76), 160)
+
+    def _can_encode(self, text: str) -> bool:
+        encoding = getattr(self.out, "encoding", None) or "utf-8"
+        try:
+            text.encode(encoding)
+        except UnicodeEncodeError:
+            return False
+        return True
 
     def _width(self) -> int:
         return min(max(shutil.get_terminal_size((72, 24)).columns, 40), 72)
