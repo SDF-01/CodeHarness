@@ -1,9 +1,11 @@
+from codeharness.branches import branch_brief
 from codeharness.config import HarnessConfig
 from codeharness.loop import run_turn
 from codeharness.model import Completion, ToolCall
 from codeharness.run import compile_and_launch
 from codeharness.session import SessionStore, database_path
 from codeharness.stack import expects_stack, stack_problem
+from codeharness.web_prompt import apply_kind, task_kind
 from tests.fakes import ScriptedModel
 
 _PAGE = "<html><body><script>fetch(\"/api/health\")</script></body></html>\n"
@@ -22,6 +24,28 @@ _SERVER = (
     "if __name__ == '__main__':\n"
     "    HTTPServer(('127.0.0.1', PORT), Handler).serve_forever()\n"
 )
+
+
+def test_a_website_brief_keeps_the_user_task() -> None:
+    task = apply_kind("build a notes app that saves and lists notes", "a website")
+    page = branch_brief("page", task)
+    api = branch_brief("api", task)
+    review = branch_brief("review", task)
+    assert page.startswith("Write index.html")
+    assert "notes app" in page
+    assert "readiness" in page
+    assert "save its data" in page
+    assert "notes app" in api
+    assert "notes app" in review
+    assert "health response is not enough" in review
+
+
+def test_a_negated_website_stays_a_command_line_tool() -> None:
+    from codeharness.web_prompt import apply_kind, task_kind
+
+    task = "Build a Python CLI named tasks.py. Do not create a website."
+    assert task_kind(task) == "cli"
+    assert "index.html" not in apply_kind(task, task)
 
 
 def test_a_local_program_is_not_a_stack() -> None:
@@ -91,3 +115,21 @@ def test_launch_opens_the_api(tmp_path, monkeypatch) -> None:
     assert code == 0
     assert "http://127.0.0.1:8766/" in report
     assert opened == ["http://127.0.0.1:8766/"]
+
+
+def test_health_probe_accepts_json(tmp_path) -> None:
+    from codeharness.stack import probe_health
+
+    (tmp_path / "index.html").write_text(_PAGE, encoding="utf-8")
+    (tmp_path / "server.py").write_text(_SERVER, encoding="utf-8")
+    assert probe_health(tmp_path) == ""
+
+
+def test_health_from_another_process_is_not_success(tmp_path, monkeypatch) -> None:
+    from codeharness.stack import probe_health
+
+    (tmp_path / "server.py").write_text(_SERVER, encoding="utf-8")
+    monkeypatch.setattr("codeharness.stack._listener_pids", lambda port: {0})
+    problem = probe_health(tmp_path)
+    assert problem.startswith("error:")
+    assert "another process" in problem

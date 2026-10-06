@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from codeharness.taskrecord import behavior_note
+
 _BUILD_WORDS = {"build", "create", "make", "design"}
 _DECIDED = {
     "react",
@@ -29,8 +31,9 @@ _YES = (
     "Write index.html and server.py. "
     "server.py uses the Python standard library http.server, serves this folder, "
     "and answers GET /api/health with JSON on port 8766. "
-    "index.html uses HTML, CSS, React, and Tailwind, with shadcn-style button, card, input, and dialog components, "
-    "and it calls /api/health. "
+    "GET /api/health is a readiness check. "
+    "index.html uses HTML, CSS, React, and Tailwind, with shadcn-style button, card, input, and dialog components. "
+    "The page must implement the request, not only call /api/health. "
     "No install. Do not use tkinter."
 )
 _NO = "Build a local Python or Java program. Do not create a website."
@@ -53,7 +56,7 @@ def apply_web_choice(task: str, allowed: bool) -> str:
 
 _KIND_WORDS = {
     "web": {"website", "web", "webpage", "react", "html", "css", "tailwind", "shadcn", "frontend"},
-    "desktop": {"desktop", "tkinter", "window", "gui"},
+    "desktop": {"desktop", "tkinter", "window", "gui", "plugin"},
     "cli": {"cli", "terminal", "command"},
     "api": {"api", "backend"},
     "game": {"game"},
@@ -68,7 +71,10 @@ _LEADING = {"lets", "let", "please", "build", "create", "make", "design", "a", "
 
 def task_kind(task: str) -> str:
     """Return web, desktop, cli, api, game, or empty when the task does not say."""
-    words = set(re.findall(r"[a-z0-9]+", task.lower()))
+    lowered = task.lower()
+    words = set(re.findall(r"[a-z0-9]+", lowered))
+    if "do not create a website" in lowered:
+        words -= {"website", "web", "webpage"}
     if "full" in words and "stack" in words:
         return "web"
     for kind, names in _KIND_WORDS.items():
@@ -103,21 +109,32 @@ def apply_kind(task: str, answer: str) -> str:
     if kind == "web":
         note = _YES
     elif kind == "desktop":
-        note = "Build a local desktop program with a window. Do not create a website."
+        note = (
+            "Build a local desktop program with tkinter. "
+            "One window stays open on the computer with mainloop. "
+            "Do not use input(). Do not create a website. Do not write index.html or a browser page."
+        )
     elif kind == "cli":
         note = "Build a command line program. Do not create a website."
     elif kind == "api":
         note = (
             "Build a local HTTP API with the Python standard library. "
-            "Write server.py and answer GET /api/health with JSON on port 8766."
+            "Write server.py and answer GET /api/health with JSON on port 8766. "
+            "GET /api/health is a readiness check."
         )
     elif kind == "game":
         note = "Build a local game. Do not assume a website."
     else:
         cleaned = " ".join(answer.split())
         if not cleaned or cleaned == task.strip():
-            return task
-        return task.rstrip() + "\n\nBuild it as the user described: " + cleaned
+            extra = behavior_note(task)
+            if not extra:
+                return task
+            return task.rstrip() + "\n\n" + extra
+        note = "Build it as the user described: " + cleaned
+    extra = behavior_note(task)
+    if extra:
+        note = note.rstrip() + "\n" + extra
     return task.rstrip() + "\n\n" + note
 
 

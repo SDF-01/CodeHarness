@@ -1,8 +1,10 @@
-from codeharness.commands import handle_turn
+from codeharness.commands import _finish_build, handle_turn
 from codeharness.config import HarnessConfig
 from codeharness.errors import TurnStopped
 from codeharness.model import Completion, ToolCall
-from codeharness.session import SessionStore, database_path
+from codeharness.projects import task_slug
+from codeharness.session import SessionStore, StoredMessage, database_path
+from codeharness.taskrecord import begin_task, load_task, settle_task
 from tests.fakes import ScriptedModel
 
 
@@ -489,3 +491,156 @@ def test_cancelling_the_folder_box_does_not_build(tmp_path) -> None:
     assert model.steps[0].content == "should not run"
     assert any("No folder chosen." in item for item in events)
     assert not (tmp_path / "projects" / "clock").exists()
+
+
+def test_lets_build_a_desktop_plugin_ignores_the_previous_program(tmp_path) -> None:
+    asked: list[str] = []
+
+    def ask(name, detail):
+        asked.append(name)
+        return True
+
+    model = ScriptedModel(
+        [
+            Completion(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="w1",
+                        name="write_file",
+                        arguments={
+                            "path": "calculator.py",
+                            "content": "import tkinter\nroot = tkinter.Tk()\nroot.mainloop()\n",
+                        },
+                    )
+                ],
+                prompt_tokens=1,
+                completion_tokens=1,
+            ),
+            Completion(content="built", tool_calls=[], prompt_tokens=1, completion_tokens=1),
+        ]
+    )
+    store = SessionStore(database_path(tmp_path))
+    session = store.create(tmp_path)
+    store.append(session, StoredMessage(role="user", content="build me your mom"))
+    store.append(session, StoredMessage(role="assistant", content="Created mom.py"))
+    store.set_work_dir(session, tmp_path / "projects" / "pocket-watch")
+    handle_turn(
+        store,
+        session,
+        "lets build a scientific calculator",
+        model,
+        HarnessConfig(project_root=tmp_path, model="test", open_windows=False),
+        ask=ask,
+        reply=lambda question: "yes, but i want it to be an actual desktop plugin",
+        choose=lambda folders, suggested: tmp_path / "projects" / suggested,
+    )
+    prompt = "\n".join(item.get("content") or "" for item in model.seen_messages[0])
+    program = tmp_path / "projects" / "scientific-calculator" / "calculator.py"
+    store.close()
+    assert asked == ["build_go"]
+    assert "mom" not in prompt
+    assert "tkinter" in prompt
+    assert "mainloop" in program.read_text(encoding="utf-8")
+    assert not (tmp_path / "mom.py").exists()
+
+
+def test_launch_opens_the_calculator_not_the_older_page(tmp_path) -> None:
+    watch = tmp_path / "projects" / "pocket-watch"
+    watch.mkdir(parents=True)
+    (watch / "index.html").write_text("<html>watch</html>\n", encoding="utf-8")
+    calc = tmp_path / "projects" / "scientific-calculator"
+    calc.mkdir(parents=True)
+    (calc / "calculator.py").write_text("print('calc-window')\n", encoding="utf-8")
+    store = SessionStore(database_path(tmp_path))
+    session = store.create(tmp_path)
+    store.append(session, StoredMessage(role="user", content="lets build a scientific calculator"))
+    store.set_work_dir(session, watch.resolve())
+    events: list[str] = []
+    handle_turn(
+        store,
+        session,
+        "launch it",
+        ScriptedModel([]),
+        HarnessConfig(project_root=tmp_path, model="test"),
+        ask=lambda name, detail: True,
+        on_event=lambda event: events.append(event.body or event.text),
+    )
+    store.close()
+    assert any("calc-window" in item for item in events)
+    assert any("scientific-calculator" in item for item in events)
+    assert not any("browser" in item.lower() for item in events)
+
+
+def test_the_kind_answer_is_applied_before_the_folder(tmp_path) -> None:
+    request = "build an atm that rejects empty input"
+    order: list[str] = []
+
+    def reply(question: str) -> str:
+        order.append("kind")
+        assert "command line" in question
+        assert not (tmp_path / "projects" / task_slug(request)).exists()
+        return "a command line tool"
+
+    def choose(folders, suggested: str):
+        order.append(suggested)
+        assert suggested == task_slug(request)
+        assert not (tmp_path / "projects" / suggested).exists()
+        return tmp_path / "projects" / suggested
+
+    def ask(name: str, detail: str) -> bool:
+        order.append(detail)
+        assert name == "build_go"
+        return False
+
+    model = ScriptedModel(
+        [Completion(content="noted", tool_calls=[], prompt_tokens=1, completion_tokens=1)]
+    )
+    store = SessionStore(database_path(tmp_path))
+    session = store.create(tmp_path)
+    handle_turn(
+        store,
+        session,
+        request,
+        model,
+        HarnessConfig(project_root=tmp_path, model="test", open_windows=False),
+        ask=ask,
+        reply=reply,
+        choose=choose,
+    )
+    text = "\n".join(message.content for message in session.messages)
+    store.close()
+    assert order[0] == "kind"
+    assert order[1] == task_slug(request)
+    assert "command line" in order[2]
+    assert f"projects/{task_slug(request)}" in order[2]
+    assert "I will check that it runs and rejects empty input." in order[2]
+    assert "reject empty input" in text
+    record = load_task(tmp_path / "projects" / task_slug(request))
+    assert record is not None
+    assert "rejects empty input" in record["requirements"][0]["acceptance"]
+
+
+def test_a_successful_launch_does_not_verify(tmp_path) -> None:
+    folder = tmp_path / "projects" / "clock"
+    folder.mkdir(parents=True)
+    (folder / "main.py").write_text("print('hello from harness')\n", encoding="utf-8")
+    begin_task(folder, "build a clock")
+    settle_task(folder, "built", [])
+    store = SessionStore(database_path(tmp_path))
+    session = store.create(tmp_path)
+    code = _finish_build(
+        store,
+        session,
+        ScriptedModel([]),
+        HarnessConfig(project_root=folder, model="test", open_windows=True),
+        ask=lambda name, detail: False,
+        on_event=None,
+        mode="build",
+    )
+    store.close()
+    record = load_task(folder)
+    assert code == 0
+    assert record is not None
+    assert record["requirements"][0]["state"] == "unverified"
+    assert "passed: launched" not in record["evidence"]

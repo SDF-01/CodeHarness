@@ -18,6 +18,7 @@ from codeharness.languages import language_of
 from codeharness.model import ChatModel, Completion, ToolCall
 from codeharness.permissions import AskFunc, PermissionGate
 from codeharness.playbook import coaching_for, lesson_from_failure, wants_harness_tests
+from codeharness.projects import PROJECTS_DIR, task_slug
 from codeharness.review import brief_report, review_paths
 from codeharness.runtime import TurnRuntime, bind_runtime, reset_runtime
 from codeharness.run import open_window, probe_compiled, probe_java, probe_program, python_script, uses_tkinter
@@ -80,6 +81,7 @@ def run_turn(
     ask: AskFunc,
     on_event: EventHandler | None = None,
     note: str = "",
+    focus: bool = False,
 ) -> TurnResult:
     token = bind_runtime(
         TurnRuntime(store=store, session=session, model=model, config=config, ask=ask, on_event=on_event)
@@ -94,6 +96,7 @@ def run_turn(
             ask=ask,
             on_event=on_event,
             note=note,
+            focus=focus,
         )
     finally:
         reset_runtime(token)
@@ -109,6 +112,7 @@ def _run_turn(
     ask: AskFunc,
     on_event: EventHandler | None = None,
     note: str = "",
+    focus: bool = False,
 ) -> TurnResult:
     if session.title == "new session" and user_text.strip():
         store.set_title(session, user_text.strip().splitlines()[0][:60])
@@ -127,8 +131,9 @@ def _run_turn(
     checks: list[str] = []
 
     for _step in range(config.max_steps):
+        prompt_messages = _focused(session.messages, user_text) if focus else session.messages
         built = build_context(
-            session.messages,
+            prompt_messages,
             config,
             lessons=store.lessons(session),
             agent=agent_name,
@@ -213,10 +218,15 @@ def _run_turn(
                 _send_back(store, session, "Run failed.", runtime_problem, on_event)
                 continue
             text = completion.content.strip() or "The model returned an empty reply."
-            if not written and not paste_sent and "```" in text:
-                paste_sent = True
-                _send_back(store, session, "Write the file.", "Do not paste the source.", on_event)
-                continue
+            if not written and "```" in text:
+                saved = _save_pasted_source(text, user_text, config.project_root)
+                if saved is not None:
+                    written.append(saved)
+                    text = f"Saved {saved.name}."
+                elif not paste_sent:
+                    paste_sent = True
+                    _send_back(store, session, "Write the file.", "Do not paste the source.", on_event)
+                    continue
             store.append(session, StoredMessage(role="assistant", content=text))
             _emit(on_event, LoopEvent("answer", f"agent: {text}", title="Result", body=text))
             _emit(on_event, LoopEvent("tokens", format_usage(usage, prefix="turn tokens")))
@@ -547,6 +557,36 @@ def _is_advice(result: str) -> bool:
 
 def _remember(store: SessionStore, session: Session, text: str) -> None:
     store.add_lesson(session, lesson_from_failure(text))
+
+
+def _focused(stored: list[StoredMessage], user_text: str) -> list[StoredMessage]:
+    """Keep the current request. Older programs in the chat stay out of the prompt."""
+    for index in range(len(stored) - 1, -1, -1):
+        message = stored[index]
+        if message.role == "user" and message.content == user_text:
+            return stored[index:]
+    return stored[-1:] if stored else stored
+
+
+def _save_pasted_source(text: str, task: str, root: Path) -> Path | None:
+    """A fenced program belongs in the project folder, not on the screen."""
+    if root.parent.name != PROJECTS_DIR:
+        return None
+    match = re.search(r"```(?:python|py)?\s*\n(.*?)```", text, re.DOTALL | re.IGNORECASE)
+    if match is None:
+        return None
+    body = match.group(1).strip()
+    if not body or ("\n" not in body and len(body) < 20):
+        return None
+    if "tkinter" in task.lower() and "tkinter" not in body.lower():
+        return None
+    named = re.search(r"\b([A-Za-z0-9_\-]+\.py)\b", text)
+    name = named.group(1) if named else f"{task_slug(task)}.py"
+    if name == "mom.py" and "mom" not in task_slug(task):
+        name = f"{task_slug(task)}.py"
+    path = root / Path(name).name
+    path.write_text(body if body.endswith("\n") else body + "\n", encoding="utf-8")
+    return path
 
 
 def _send_back(

@@ -35,6 +35,9 @@ def test_task_slug_uses_the_program_name() -> None:
     assert task_slug("build an atm") == "atm"
     assert task_slug("handoff build a digital clock") == "digital-clock"
     assert task_slug("make it red") == "it-red"
+    assert task_slug("lets build a scientific calculator") == "scientific-calculator"
+    noted = "build an atm\n\nBuild a full stack app. Write index.html and server.py."
+    assert task_slug(noted) == "atm"
 
 
 def test_a_build_lands_in_its_own_folder(tmp_path) -> None:
@@ -68,6 +71,31 @@ def test_a_build_lands_in_its_own_folder(tmp_path) -> None:
     assert not (tmp_path / "projects" / "button-red").exists()
     joined = "\n".join(item.get("content") or "" for batch in model.seen_messages for item in batch)
     assert "atm.py" in joined
+
+
+def test_undo_puts_the_file_back(tmp_path) -> None:
+    model = ScriptedModel(
+        [
+            _write("atm.py", "print('atm')\n"),
+            Completion(content="built", tool_calls=[], prompt_tokens=1, completion_tokens=1),
+            _edit("atm.py", "print('atm')\n", "print('atm-fixed')\n"),
+            Completion(content="fixed", tool_calls=[], prompt_tokens=1, completion_tokens=1),
+        ]
+    )
+    store = SessionStore(database_path(tmp_path))
+    session = store.create(tmp_path)
+    config = HarnessConfig(
+        project_root=tmp_path,
+        model="test",
+        permissions={**HarnessConfig().permissions, "write_file": "allow", "edit_file": "allow"},
+    )
+    handle_turn(store, session, "build an atm", model, config, ask=lambda name, detail: False)
+    handle_turn(store, session, "fix the menu", model, config, ask=lambda name, detail: False)
+    program = tmp_path / "projects" / "atm" / "atm.py"
+    assert program.read_text(encoding="utf-8") == "print('atm-fixed')\n"
+    handle_turn(store, session, "undo", model, config, ask=lambda name, detail: False)
+    store.close()
+    assert program.read_text(encoding="utf-8") == "print('atm')\n"
 
 
 def test_launch_from_the_harness_uses_projects(tmp_path) -> None:

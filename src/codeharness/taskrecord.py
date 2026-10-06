@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 SCHEMA = 1
@@ -18,6 +19,13 @@ _NEXT = {
     "blocked": {"pending", "implementing"},
 }
 _SKIP = {".codeharness", ".git", "__pycache__", ".venv", "venv", "node_modules", ".pytest_cache"}
+_BEHAVIORS = (
+    (re.compile(r"\b(?:save|saves|saving|saved|persist|persists|persistence)\b", re.I), "save its data", "saves its data"),
+    (re.compile(r"\b(?:list|lists|listing)\b", re.I), "list its data", "lists its data"),
+    (re.compile(r"\b(?:add|adds|adding)\b", re.I), "add an item", "adds an item"),
+    (re.compile(r"\b(?:empty|blank)\b", re.I), "reject empty input", "rejects empty input"),
+    (re.compile(r"\binvalid\b", re.I), "reject invalid input", "rejects invalid input"),
+)
 
 
 class TaskTransitionError(ValueError):
@@ -37,8 +45,8 @@ def begin_task(root: Path, request: str) -> dict:
                 {
                     "id": "r1",
                     "text": text,
-                    "acceptance": "The program runs and meets this request.",
-                    "procedure": "Run the program and compare the result with the request.",
+                    "acceptance": acceptance_text(text),
+                    "procedure": procedure_text(text),
                     "state": "pending",
                 }
             ],
@@ -56,8 +64,8 @@ def begin_task(root: Path, request: str) -> dict:
                 {
                     "id": f"r{len(record['requirements']) + 1}",
                     "text": text,
-                    "acceptance": "The change runs and meets this amendment.",
-                    "procedure": "Run the program and compare the result with the amendment.",
+                    "acceptance": acceptance_text(text, amendment=True),
+                    "procedure": procedure_text(text, amendment=True),
                     "state": "pending",
                 }
             )
@@ -116,6 +124,8 @@ def judge(text: str, evidence: list[str]) -> str:
         return "failed" if cleaned.startswith("Stopped") or cleaned.startswith("Stack failed") else "unverified"
     latest = ""
     for line in evidence:
+        if line.strip() == "passed: launched":
+            continue
         if line.startswith(("passed:", "failed:", "error:", "unverified:")):
             latest = line
     if latest.startswith("passed:"):
@@ -182,6 +192,56 @@ def _requirement(record: dict, requirement_id: str) -> dict:
         if item["id"] == requirement_id:
             return item
     raise TaskTransitionError(f"unknown requirement: {requirement_id}")
+
+
+def named_behaviors(request: str) -> list[tuple[str, str]]:
+    """Return (infinitive, finite) lines for save, list, add, empty, and invalid input."""
+    user = request.split("\n\n", 1)[0]
+    found: list[tuple[str, str]] = []
+    for pattern, infinitive, finite in _BEHAVIORS:
+        if pattern.search(user):
+            found.append((infinitive, finite))
+    return found
+
+
+def behavior_note(request: str) -> str:
+    """A model note for the behavior the request names. Empty when it names none."""
+    lines = [infinitive for infinitive, _finite in named_behaviors(request)]
+    if not lines:
+        return ""
+    return "The program must " + _join(lines) + "."
+
+
+def acceptance_text(request: str, amendment: bool = False) -> str:
+    """Requirement acceptance. Named behavior is listed. Otherwise the request stands."""
+    lines = [finite for _infinitive, finite in named_behaviors(request)]
+    if not lines:
+        if amendment:
+            return "The change runs and meets this amendment."
+        return "The program runs and meets this request."
+    return "The program " + _join(["runs", *lines]) + "."
+
+
+def procedure_text(request: str, amendment: bool = False) -> str:
+    lines = [finite for _infinitive, finite in named_behaviors(request)]
+    if not lines:
+        target = "the amendment" if amendment else "the request"
+        return f"Run the program and compare the result with {target}."
+    return "Run the program and check that it " + _join(lines) + "."
+
+
+def check_clause(request: str) -> str:
+    """The acceptance half of the one build yes."""
+    lines = ["it runs", *[finite for _infinitive, finite in named_behaviors(request)]]
+    return "I will check that " + _join(lines) + "."
+
+
+def _join(parts: list[str]) -> str:
+    if len(parts) == 1:
+        return parts[0]
+    if len(parts) == 2:
+        return f"{parts[0]} and {parts[1]}"
+    return ", ".join(parts[:-1]) + ", and " + parts[-1]
 
 
 def _path(root: Path) -> Path:

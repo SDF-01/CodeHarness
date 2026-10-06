@@ -46,6 +46,13 @@ def compile_and_launch(config: HarnessConfig) -> tuple[int, str]:
     if not _ok(compiled):
         return 1, f"Compile failed.\n{compiled}\nLaunch skipped."
 
+    target = _newest_program(config.project_root)
+    if target is not None and target.suffix.lower() == ".py" and uses_tkinter(target):
+        opened = open_window(target, config.project_root)
+        if opened.startswith("error:"):
+            return 1, f"Compile passed.\nLaunch failed.\n{opened}"
+        return 0, f"Compile passed.\nLaunch passed.\n{opened}"
+
     launch = _launch_command(config)
     if not launch:
         return 0, "Compile passed.\nNo program to launch. Write a Python, Java, or HTML file in the project folder first."
@@ -98,6 +105,13 @@ def _newest_program(root: Path) -> Path | None:
     ]
     if not scripts:
         return None
+    python = [
+        path
+        for path in scripts
+        if path.suffix.lower() == ".py" and path.name != "server.py"
+    ]
+    if python:
+        return max(python, key=lambda path: path.stat().st_mtime)
     return max(scripts, key=lambda path: path.stat().st_mtime)
 
 
@@ -198,7 +212,7 @@ def probe_java(path: Path, root: Path) -> str:
     if "void main" not in source:
         return ""
     if shutil.which("javac") is None or shutil.which("java") is None:
-        return ""
+        return "unverified: javac is not installed."
     with tempfile.TemporaryDirectory() as raw:
         out = Path(raw)
         compiled = subprocess.run(
@@ -247,8 +261,10 @@ def probe_compiled(path: Path, root: Path) -> str:
     """Compile a source file when its compiler is installed. A missing compiler is not a model error."""
     spec = _COMPILED.get(path.suffix.lower())
     if path.suffix.lower() == ".rs":
-        if shutil.which("rustc") is None or not path.is_file():
+        if not path.is_file():
             return ""
+        if shutil.which("rustc") is None:
+            return "unverified: rustc is not installed."
         with tempfile.TemporaryDirectory() as raw:
             return _compile_result(
                 path,
@@ -256,15 +272,17 @@ def probe_compiled(path: Path, root: Path) -> str:
                 ["rustc", "--edition", "2021", "--crate-type", "lib", "--out-dir", raw, str(path.resolve())],
             )
     if path.suffix.lower() == ".kt":
-        if shutil.which("kotlinc") is None or not path.is_file():
+        if not path.is_file():
             return ""
+        if shutil.which("kotlinc") is None:
+            return "unverified: kotlinc is not installed."
         with tempfile.TemporaryDirectory() as raw:
             return _compile_result(path, root, ["kotlinc", str(path.resolve()), "-d", raw])
     if spec is None or not path.is_file():
         return ""
     tool, argv = spec
     if shutil.which(tool) is None:
-        return ""
+        return f"unverified: {tool} is not installed."
     return _compile_result(path, root, [*argv, str(path.resolve())])
 
 

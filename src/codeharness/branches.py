@@ -7,6 +7,7 @@ so the page prompt does not carry the API tool log.
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 from codeharness.config import HarnessConfig
 from codeharness.diagnostics import diagnose
@@ -18,6 +19,7 @@ from codeharness.run import compile_and_launch
 from codeharness.scaffold import write_stack_skeleton
 from codeharness.session import Session, SessionStore, StoredMessage
 from codeharness.stack import probe_health, stack_problem
+from codeharness.taskrecord import add_evidence, behavior_note
 from codeharness.todos import mark_done, parse_plan, save_todos
 
 _ORDER = ("page", "api", "review")
@@ -25,16 +27,21 @@ _STEPS = {"route": 2, "page": 4, "api": 4, "review": 4}
 _LABELS = {"route": "Route", "page": "Page", "api": "API", "review": "Review"}
 _BRIEFS = {
     "page": (
-        "Write index.html in this folder. It must call /api/health. "
+        "Write index.html in this folder. "
+        "The page must implement the user's request, not only call /api/health. "
+        "/api/health is a readiness check. "
         "Use HTML, CSS, React, Tailwind, and shadcn-style components. "
         "Do not create a Python file."
     ),
     "api": (
         "Write server.py in this folder. Use http.server, serve this folder, "
-        "and answer GET /api/health with JSON on port 8766."
+        "and answer GET /api/health with JSON on port 8766. "
+        "GET /api/health is a readiness check. Implement the behavior in the user request."
     ),
     "review": (
-        "Check the page and the API. Edit a file only if it is wrong. Do not create a new file."
+        "Check the page and the API against the user request. "
+        "A health response is not enough. "
+        "Edit a file only if it is wrong. Do not create a new file."
     ),
 }
 _FILES = {"page": "index.html", "api": "server.py", "review": "index.html"}
@@ -69,7 +76,7 @@ def run_stack(
         _emit(on_event, LoopEvent("status", skeleton, title="Harness", body=skeleton))
     failure = ""
     for name in names:
-        brief = _BRIEFS[name]
+        brief = branch_brief(name, task)
         if failure:
             brief = f"{brief}\n{failure}"
         text = _branch(
@@ -80,7 +87,7 @@ def run_stack(
             config,
             ask,
             on_event,
-            note=repo_map(config.project_root),
+            note=_worker_note(task, config.project_root),
         )
         _note(store, session, name, text, on_event)
         if _empty(text):
@@ -154,11 +161,13 @@ def _prove(store, session, task, model, config, ask, on_event) -> str:
             config,
             ask,
             on_event,
-            note=repo_map(config.project_root),
+            note=_worker_note(task, config.project_root),
         )
         problem = stack_problem(config.project_root, task) or probe_health(config.project_root)
     if problem:
+        add_evidence(config.project_root, f"failed: {problem}")
         return problem
+    add_evidence(config.project_root, "passed: GET /api/health")
     if config.open_windows:
         _code, report = compile_and_launch(config)
         message = report.strip() or "Health passed."
@@ -167,6 +176,28 @@ def _prove(store, session, task, model, config, ask, on_event) -> str:
     store.append(session, StoredMessage(role="assistant", content=message))
     _emit(on_event, LoopEvent("answer", message, title="Result", body=message))
     return ""
+
+
+def branch_brief(name: str, task: str) -> str:
+    """Page, API, and review each see the user's request. Health stays a readiness check."""
+    user = task.split("\n\n", 1)[0].strip()
+    parts = [_BRIEFS[name], f"User request: {user}"]
+    extra = behavior_note(task)
+    if extra:
+        parts.append(extra)
+    return "\n".join(parts)
+
+
+def _worker_note(task: str, root: Path) -> str:
+    """Every branch sees the original request, not only its file name."""
+    extra = behavior_note(task)
+    tail = f"\n{extra}" if extra and extra not in task else ""
+    return (
+        f"Requirements:\n{task.strip()}\n\n"
+        "Acceptance: the finished program must meet the requirements above."
+        f"{tail}\n\n"
+        f"{repo_map(root)}"
+    )
 
 
 def _chosen(text: str) -> list[str]:

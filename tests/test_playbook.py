@@ -83,7 +83,16 @@ def test_web_and_java_skills_match_their_stacks() -> None:
     assert kind_question("build a react dashboard") == ""
     assert "server.py" in apply_kind("build an atm", "a website")
     assert "Do not create a website." in apply_kind("build an atm", "a desktop app")
+    desktop = apply_kind("lets build a scientific calculator", "yes, but i want it to be an actual desktop plugin")
+    assert "tkinter" in desktop
+    assert "mainloop" in desktop
+    assert "index.html" in desktop
     assert "described:" in apply_kind("build an atm", "how should i know")
+    website = apply_kind("build a notes app that saves and lists notes", "a website")
+    assert "readiness" in website
+    assert "not only call /api/health" in website
+    assert "save its data" in website
+    assert "list its data" in website
 
 
 def test_a_branch_loads_one_skill() -> None:

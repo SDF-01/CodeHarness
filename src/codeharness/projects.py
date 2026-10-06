@@ -12,6 +12,26 @@ from codeharness.session import Session, SessionStore
 PROJECTS_DIR = "projects"
 _PROGRAM_SUFFIXES = {".py", ".java", ".html", ".htm"}
 _LEADING = {"handoff", "build", "create", "make", "design", "write", "implement"}
+_FILLER = {
+    "lets",
+    "let",
+    "please",
+    "can",
+    "could",
+    "would",
+    "just",
+    "now",
+    "hey",
+    "ok",
+    "okay",
+    "i",
+    "we",
+    "you",
+    "wanna",
+    "want",
+    "need",
+    "to",
+}
 _SKIP = {
     "a",
     "an",
@@ -44,9 +64,17 @@ _NEW = re.compile(r"^(handoff\s+)?(build|create|make|design|write|implement)\b")
 _TWEAK = re.compile(r"^(fix|change|update|edit)\b|^make\s+the\b")
 
 
+def _opening(text: str) -> str:
+    """Drop chatter in front of the verb. 'lets build a clock' starts at build."""
+    words = re.findall(r"[a-z0-9]+", text.replace("'", "").split("\n", 1)[0].lower())
+    while words and words[0] in _FILLER:
+        words.pop(0)
+    return " ".join(words)
+
+
 def task_slug(text: str) -> str:
     """Short folder name taken from a build request."""
-    words = re.findall(r"[a-z0-9]+", text.lower())
+    words = _opening(text).split()
     while words and words[0] in _LEADING:
         words.pop(0)
     kept = [word for word in words if word not in _SKIP]
@@ -59,13 +87,14 @@ def task_slug(text: str) -> str:
 def wants_new_folder(text: str, has_project: bool = False) -> bool:
     """True when this message starts a program, not a tweak of the current one."""
     stripped = " ".join(text.strip().lower().split())
+    opening = _opening(text)
     if has_project and is_tweak(stripped):
         return False
-    if stripped in {"plan", "build"} or stripped in _RUN:
+    if stripped in {"plan", "build"} or stripped in _RUN or opening in {"plan", "build"}:
         return False
-    if _NEW.match(stripped) is None:
+    if _NEW.match(opening) is None:
         return False
-    return task_slug(stripped).split("-")[0] not in _VAGUE
+    return task_slug(text).split("-")[0] not in _VAGUE
 
 
 def is_tweak(text: str) -> bool:

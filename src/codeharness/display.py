@@ -253,7 +253,12 @@ class Console:
             self._show_tool(item)
             return
         if item.kind == "answer":
-            self.block("Result", (item.body or item.text).strip())
+            body = (item.body or item.text).strip()
+            if "files:" in body.lower() and "server.py:" in body.lower():
+                return
+            if "```" in body and body.count("\n") > 12:
+                return
+            self.block("Result", body)
             return
         if item.kind == "status":
             line = progress_line(item.body or item.text)
@@ -674,6 +679,8 @@ def approval_sentence(tool_name: str, detail: str) -> str:
     if tool_name == "doom_loop":
         return "Try that again?"
     if tool_name == "build_go":
+        if "I will check that" in detail:
+            return detail
         if detail.startswith("update "):
             return f"Update this in {detail.removeprefix('update ').strip() or 'this folder'}?"
         return f"Build this in {detail.strip() or 'this folder'}?"
