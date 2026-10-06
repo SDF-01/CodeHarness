@@ -299,8 +299,13 @@ def test_a_greeting_cannot_create_a_file(tmp_path) -> None:
 
 
 def test_a_sentence_at_approval_becomes_the_request(tmp_path) -> None:
+    raised = {"done": False}
+
     def ask(name, detail):
-        raise TurnStopped("build me your mom")
+        if not raised["done"]:
+            raised["done"] = True
+            raise TurnStopped("build me your mom")
+        return True
 
     picked: list[str] = []
 
@@ -383,6 +388,84 @@ def test_a_missing_file_is_not_opened(tmp_path) -> None:
     assert asked == ["write_file"]
     assert any("That file is not there yet." in item for item in events)
     assert not (tmp_path / "main.py").exists()
+
+
+def test_a_build_compiles_and_launches(tmp_path) -> None:
+    asked: list[str] = []
+
+    def ask(name, detail):
+        asked.append(name)
+        return True
+
+    model = ScriptedModel(
+        [
+            Completion(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="w1",
+                        name="write_file",
+                        arguments={"path": "main.py", "content": "print('hello from harness')\n"},
+                    )
+                ],
+                prompt_tokens=1,
+                completion_tokens=1,
+            ),
+            Completion(content="built", tool_calls=[], prompt_tokens=1, completion_tokens=1),
+        ]
+    )
+    store = SessionStore(database_path(tmp_path))
+    session = store.create(tmp_path)
+    events: list[str] = []
+    handle_turn(
+        store,
+        session,
+        "build a clock",
+        model,
+        HarnessConfig(project_root=tmp_path, model="test", open_windows=True),
+        ask=ask,
+        on_event=lambda event: events.append(event.body or event.text),
+        choose=lambda folders, suggested: tmp_path / "projects" / "clock",
+    )
+    program = tmp_path / "projects" / "clock" / "main.py"
+    store.close()
+    assert asked == ["build_go"]
+    assert program.read_text(encoding="utf-8") == "print('hello from harness')\n"
+    assert any("Compiling." in item for item in events)
+    assert any("Launch passed." in item for item in events)
+    assert any("hello from harness" in item for item in events)
+
+
+def test_declining_the_build_does_not_write(tmp_path) -> None:
+    model = ScriptedModel(
+        [
+            Completion(
+                content="",
+                tool_calls=[
+                    ToolCall(id="w1", name="write_file", arguments={"path": "main.py", "content": "print(1)\n"})
+                ],
+                prompt_tokens=1,
+                completion_tokens=1,
+            )
+        ]
+    )
+    store = SessionStore(database_path(tmp_path))
+    session = store.create(tmp_path)
+    events: list[str] = []
+    handle_turn(
+        store,
+        session,
+        "build a clock",
+        model,
+        HarnessConfig(project_root=tmp_path, model="test"),
+        ask=lambda name, detail: False,
+        on_event=lambda event: events.append(event.body or event.text),
+        choose=lambda folders, suggested: tmp_path / "projects" / "clock",
+    )
+    store.close()
+    assert model.seen_messages
+    assert not any("Launch passed." in item for item in events)
+    assert not (tmp_path / "projects" / "clock" / "main.py").exists()
 
 
 def test_cancelling_the_folder_box_does_not_build(tmp_path) -> None:

@@ -465,6 +465,12 @@ def progress_line(body: str) -> str:
         return ""
     if "planning" in lowered:
         return "Planning"
+    if "compiling" in lowered:
+        return "Compiling."
+    if lowered.startswith("launching"):
+        return "Launching."
+    if "fixing the launch" in lowered:
+        return "Fixing the launch."
     if "building" in lowered:
         return "Building"
     if lowered.startswith("wrote ") or lowered.startswith("queued:") or lowered.startswith("project folder:"):
@@ -592,6 +598,10 @@ def approval_sentence(tool_name: str, detail: str) -> str:
         return "Build this as a realistic web app with HTML, CSS, React, Tailwind, and shadcn?"
     if tool_name == "doom_loop":
         return "Try that again?"
+    if tool_name == "build_go":
+        if detail.startswith("update "):
+            return f"Update this in {detail.removeprefix('update ').strip() or 'this folder'}?"
+        return f"Build this in {detail.strip() or 'this folder'}?"
     return "Allow this step?"
 
 

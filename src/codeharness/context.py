@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from codeharness.config import HarnessConfig
 from codeharness.languages import LANGUAGE_NAMES
@@ -12,7 +12,7 @@ from codeharness.session import StoredMessage
 
 SYSTEM_PROMPT = (
     "You are a coding agent in one project directory. "
-    "Work like OpenCode: write code into project files, then prove it runs. "
+    "Work like OpenCode: write code into project files. "
     f"You can write {LANGUAGE_NAMES}. Follow the language the user chose. "
     "Use write_file to create a file and edit_file to change one that exists. "
     "Write a new file in one write_file call. Do not explain the code before that call. "
@@ -21,7 +21,7 @@ SYSTEM_PROMPT = (
     "Call a tool when you need one. Do not print a JSON tool call as the answer. "
     "If the user is greeting you or chatting, answer in text and do not call a tool. "
     "Do not invent a program from a greeting. "
-    "Launch the project only when the user asks to launch, run, or start it."
+    "Do not launch the program yourself. The harness compiles and launches it after the files are saved."
 )
 
 
@@ -30,6 +30,7 @@ class BuiltContext:
     messages: list[dict]
     estimated_tokens: int
     pruned: bool
+    tools: list[dict] = field(default_factory=list)
 
 
 def estimate_tokens(text: str) -> int:
@@ -56,23 +57,42 @@ def build_context(
     lessons: list[str] | None = None,
     agent: str = "build",
     note: str = "",
+    tools: list[dict] | None = None,
 ) -> BuiltContext:
-    """Keep the newest tool result and replace older ones with stubs when over budget."""
-    tool_indexes = [index for index, message in enumerate(stored) if message.role == "tool"]
+    """Keep a valid request inside the budget, including tool schemas."""
+    schemas = tools or []
+    kept = list(stored)
+    tool_indexes = [index for index, message in enumerate(kept) if message.role == "tool"]
     order = tool_indexes[:-1] + tool_indexes[-1:]
     stubbed: set[int] = set()
     pruned = False
-    messages = _assemble(stored, stubbed, config, lessons or [], agent, note, pruned)
+    messages = _assemble(kept, stubbed, config, lessons or [], agent, note, pruned)
     for index in order:
-        if estimate_messages(messages) <= config.prompt_budget:
+        if _request_tokens(messages, schemas) <= config.prompt_budget:
+            break
+        if index >= len(kept):
             break
         stubbed.add(index)
         pruned = True
-        messages = _assemble(stored, stubbed, config, lessons or [], agent, note, pruned)
+        messages = _assemble(kept, stubbed, config, lessons or [], agent, note, pruned)
+    while kept and _request_tokens(messages, schemas) > config.prompt_budget:
+        kept = _drop_oldest(kept)
+        stubbed = {index for index in stubbed if index < len(kept)}
+        pruned = True
+        messages = _assemble(kept, stubbed, config, lessons or [], agent, note, pruned)
+    kept_tools = list(schemas)
+    while kept_tools and _request_tokens(messages, kept_tools) > config.prompt_budget:
+        kept_tools.pop()
+        pruned = True
+    if messages and _request_tokens(messages, kept_tools) > config.prompt_budget:
+        room = config.prompt_budget - _schema_tokens(kept_tools)
+        messages[0]["content"] = _fit(str(messages[0]["content"]), max(room, 1))
+        pruned = True
     return BuiltContext(
         messages=messages,
-        estimated_tokens=estimate_messages(messages),
+        estimated_tokens=_request_tokens(messages, kept_tools),
         pruned=pruned,
+        tools=kept_tools,
     )
 
 
@@ -134,6 +154,41 @@ def _assemble(
         content = _stub(message) if index in stubbed else message.content
         messages.append(_to_api(message, content))
     return messages
+
+
+def _request_tokens(messages: list[dict], tools: list[dict]) -> int:
+    return estimate_messages(messages) + _schema_tokens(tools)
+
+
+def _schema_tokens(tools: list[dict]) -> int:
+    if not tools:
+        return 0
+    return estimate_tokens(json.dumps(tools, sort_keys=True))
+
+
+def _fit(text: str, token_budget: int) -> str:
+    limit = max(token_budget, 1) * 4
+    if len(text) <= limit:
+        return text
+    return text[:limit]
+
+
+def _drop_oldest(kept: list[StoredMessage]) -> list[StoredMessage]:
+    """Drop one complete turn so a tool call is never left without its result."""
+    if not kept:
+        return kept
+    first = kept[0]
+    if first.role == "assistant" and first.tool_calls:
+        ids = {str(call.get("id") or "") for call in first.tool_calls}
+        rest: list[StoredMessage] = []
+        skipping = True
+        for message in kept[1:]:
+            if skipping and message.role == "tool" and (message.tool_call_id or "") in ids:
+                continue
+            skipping = False
+            rest.append(message)
+        return rest
+    return kept[1:]
 
 
 def _stub(message: StoredMessage) -> str:

@@ -131,6 +131,8 @@ def test_repo_map_stays_off_the_screen() -> None:
 def test_approval_names_the_file_not_the_tool() -> None:
     assert approval_sentence("write_file", "atm_gui.py") == "Create atm_gui.py?"
     assert approval_sentence("shell", 'python atm_gui.py') == "Open atm_gui.py in a window?"
+    assert approval_sentence("build_go", "projects/clock") == "Build this in projects/clock?"
+    assert progress_line("Compiling.") == "Compiling."
 
 
 def test_folder_choice_picks_a_number_or_the_new_folder(tmp_path) -> None:
