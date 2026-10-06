@@ -8,6 +8,7 @@ from codeharness.display import (
     approval_sentence,
     folder_choice,
     format_status,
+    meter_line,
     progress_line,
 )
 from codeharness.loop import LoopEvent, run_turn
@@ -149,6 +150,22 @@ def test_a_sentence_is_not_a_yes_or_a_no() -> None:
     assert approval_choice("no") == "no"
     assert approval_choice("what needs a yes") == "stop"
     assert approval_choice("you dont even know what youre building") == "stop"
+
+
+def test_a_build_meter_hides_the_source() -> None:
+    buffer = StringIO()
+    view = Console(out=buffer, color=False)
+    source = "```python\nimport math\ndef add(x, y):\n    return x + y\n```"
+    view.event(LoopEvent("meter", "8"))
+    view.event(LoopEvent("delta", source))
+    view.event(LoopEvent("answer", source, title="Result", body=source))
+    view.event(LoopEvent("meter", "100"))
+    text = buffer.getvalue()
+    assert "import math" not in text
+    assert "Thinking" not in text
+    assert "Result" not in text
+    assert "100%" in text
+    assert meter_line(100, fancy=False).strip().endswith("100%")
 
 
 def test_a_tool_name_is_not_a_progress_line() -> None:

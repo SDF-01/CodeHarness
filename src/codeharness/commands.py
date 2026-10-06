@@ -125,13 +125,17 @@ def _handle_turn(
         return handoff(store, session, task, model, config, ask, on_event, reply)
     chosen = _with_web_choice(text, on_event, reply)
     if expects_stack(chosen):
+        _meter(on_event, "8")
         begin_task(config.project_root, chosen)
         code = lead_stack(store, session, chosen, model, config, ask, on_event)
         _settle(config.project_root, session)
+        _meter(on_event, "100" if code == 0 else "failed")
         return code
     note, turn_config = _follow_up(text, notice, config)
     mode = _construction(chosen, turn_config)
     armed = _arm_build(mode, turn_config, ask)
+    if mode:
+        _meter(on_event, "8")
     begin_task(config.project_root, chosen)
     result = run_turn(
         store=store,
@@ -144,7 +148,14 @@ def _handle_turn(
         note=note,
     )
     settle_task(config.project_root, result.text, result.checks)
-    return _finish_build(store, session, model, armed, ask, on_event, mode)
+    code = _finish_build(store, session, model, armed, ask, on_event, mode)
+    if mode:
+        _meter(on_event, "100" if code == 0 else "failed")
+    return code
+
+
+def _meter(on_event: EventHandler | None, value: str) -> None:
+    _emit(on_event, LoopEvent("meter", value, title="meter", body=value))
 
 
 def _settle(root: Path, session: Session) -> None:
@@ -177,11 +188,13 @@ def handoff(
         message = "Type handoff and the task. Example: handoff build a clock."
         _emit(on_event, LoopEvent("answer", message, title="Result", body=message))
         return 0
+    _meter(on_event, "8")
     task = _with_web_choice(task, on_event, reply)
     begin_task(config.project_root, task)
     if expects_stack(task):
         code = lead_stack(store, session, task, model, config, ask, on_event)
         _settle(config.project_root, session)
+        _meter(on_event, "100" if code == 0 else "failed")
         return code
     store.set_agent(session, "plan")
     _emit(on_event, LoopEvent("status", "Planning. Files stay unchanged.", title="Harness", body="Planning. Files stay unchanged."))
@@ -198,6 +211,7 @@ def handoff(
         message = "The plan was empty. Build did not start."
         _emit(on_event, LoopEvent("answer", message, title="Result", body=message))
         settle_task(config.project_root, message, ["failed: the plan was empty"])
+        _meter(on_event, "failed")
         return 0
     store.set_agent(session, "build")
     _emit(on_event, LoopEvent("status", "Building from the plan.", title="Harness", body="Building from the plan."))
@@ -213,7 +227,9 @@ def handoff(
         on_event=on_event,
     )
     settle_task(config.project_root, built.text, built.checks)
-    return _finish_build(store, session, model, armed, ask, on_event, mode)
+    code = _finish_build(store, session, model, armed, ask, on_event, mode)
+    _meter(on_event, "100" if code == 0 else "failed")
+    return code
 
 
 def launch_with_repair(

@@ -159,6 +159,9 @@ class Console:
         self.used = 0
         self.estimated = False
         self.phase = "ready"
+        self._meter_on = False
+        self._meter_pct = 0
+        self._meter_open = False
 
     def banner(self, config: HarnessConfig, session_id: str) -> None:
         width = self._banner_width()
@@ -219,9 +222,18 @@ class Console:
     def prompt_block(self, text: str) -> None:
         self._shown = set()
         self._streamed = ""
+        self._meter_on = False
+        self._meter_pct = 0
+        self._meter_open = False
         self.block("Prompt", text.strip())
 
     def event(self, item: LoopEvent) -> None:
+        if item.kind == "meter":
+            self._take_meter(item.text or item.body or "0")
+            return
+        if self._meter_on:
+            self._quiet(item)
+            return
         if item.kind == "phase":
             self.phase = item.text or self.phase
             return
@@ -250,6 +262,60 @@ class Console:
             return
         title = item.title or _TITLES.get(item.kind, item.kind)
         self.block(title, item.body or item.text)
+
+    def _take_meter(self, raw: str) -> None:
+        self._meter_on = True
+        if raw.strip() == "failed":
+            self._paint_meter(self._meter_pct or 100, done=True, note="failed")
+            self._meter_on = False
+            return
+        try:
+            percent = int(raw.strip())
+        except ValueError:
+            percent = self._meter_pct
+        self._paint_meter(percent, done=percent >= 100)
+
+    def _quiet(self, item: LoopEvent) -> None:
+        """A build stays off the screen. The bar is the only motion."""
+        body = (item.body or item.text or "").lower()
+        if item.kind == "status" and "compil" in body:
+            self._paint_meter(max(self._meter_pct, 90), done=False)
+            return
+        if item.kind == "delta":
+            self._nudge(1, 84)
+            return
+        if item.kind == "tool":
+            self._nudge(6, 88)
+            return
+        if item.kind == "answer":
+            self._nudge(4, 92)
+            return
+        self._nudge(1, 70)
+
+    def _nudge(self, amount: int, cap: int) -> None:
+        if self._meter_pct >= cap:
+            return
+        self._paint_meter(min(self._meter_pct + amount, cap), done=False)
+
+    def _paint_meter(self, percent: int, done: bool, note: str = "") -> None:
+        percent = max(0, min(100, percent))
+        if percent < self._meter_pct and not done:
+            percent = self._meter_pct
+        self._meter_pct = percent
+        fancy = self._can_encode("█░")
+        line = meter_line(percent, fancy=fancy)
+        if note:
+            line = f"{line}  {note}"
+        painted = self._hex(line, _GOLD)
+        if self._meter_open:
+            print("\r" + painted, file=self.out, end="", flush=True)
+        else:
+            print(painted, file=self.out, end="", flush=True)
+            self._meter_open = True
+        if done:
+            print(file=self.out)
+            self._meter_open = False
+            self._meter_on = False
 
     def _status_once(self, title: str, body: str) -> None:
         key = (title, body)
@@ -447,6 +513,15 @@ class Console:
         }
         code = codes.get(tone, "0")
         return f"\033[{code}m{text}\033[0m"
+
+
+def meter_line(percent: int, width: int = 28, fancy: bool = True) -> str:
+    """One bar and a percent. The build itself stays off this line."""
+    percent = max(0, min(100, percent))
+    filled = int(width * percent / 100)
+    mark = "█" if fancy else "#"
+    rest = "░" if fancy else "-"
+    return f"  {mark * filled}{rest * (width - filled)}  {percent:3d}%"
 
 
 def progress_line(body: str) -> str:
