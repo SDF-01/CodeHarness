@@ -7,17 +7,15 @@ import shutil
 import sys
 from typing import TextIO
 
+from codeharness.catalog import skill_catalog, skill_count, tool_catalog, tool_count
 from codeharness.config import HarnessConfig
 from codeharness.loop import LoopEvent
 
-_ROBOT = (
-    "         ___",
-    "        [o_o]",
-    "       <[___]>",
-    "         | |",
-    "        /   \\",
-    '    "What should we build?"',
-)
+_GOLD = "#FFD700"
+_AMBER = "#FFBF00"
+_BRONZE = "#CD7F32"
+_DIM = "#B8860B"
+_TEXT = "#FFF8DC"
 
 _MARKS = {
     "prompt": ">",
@@ -53,35 +51,56 @@ class Console:
         self.color = self.out.isatty() if color is None else color
         self._streamed = ""
         self._shown: set[tuple[str, str]] = set()
+        self.used = 0
+        self.estimated = False
+        self.phase = "ready"
 
     def banner(self, config: HarnessConfig, session_id: str) -> None:
-        for line in _ROBOT:
-            self._write(self._paint(line, "harness"))
+        width = max(self._width(), 48)
+        version = "v0.1.0"
+        title = "CODEHARNESS"
+        gap = max(width - len(title) - len(version), 1)
+        self._write(self._hex(title + (" " * gap) + version, _GOLD))
+        border = "+" + ("-" * (width - 2)) + "+"
+        self._write(self._hex(border, _BRONZE))
+        self._write(self._hex("| [==]", _BRONZE) + "  " + self._hex(config.model or "(no model)", _TEXT))
+        self._write(self._hex("| <[]>", _BRONZE) + "  " + self._hex(f"session {session_id}", _DIM))
+        self._write(self._hex("Available Tools", _AMBER))
+        for line in tool_catalog().splitlines():
+            self._write("  " + self._hex(_fit(line, width - 2), _TEXT))
+        self._write(self._hex("Available Skills", _AMBER))
+        for line in skill_catalog().splitlines():
+            self._write("  " + self._hex(_fit(line, width - 2), _TEXT))
+        self._write(self._hex("Profile: local", _AMBER) + "  " + self._hex(config.model or "(no model)", _TEXT))
+        footer = f"{tool_count()} tools · {skill_count()} skills · /help for commands"
+        self._write(self._hex(footer, _DIM))
+        self._write(self._hex(border, _BRONZE))
+        self._write("Welcome to CodeHarness. Type your message or /help for commands.")
         self._write("")
-        self._write(self._paint("CodeHarness", "title"))
-        self._write("Local coding buddy")
-        self._write("")
-        self._write("You type at >")
-        self._write("  1  Harness lines up the task")
-        self._write("  2  Ollama writes the files")
-        self._write("  3  You get a short recap, not a code dump")
-        self._write("")
-        self._write("Prompt > Harness > Ollama > files")
-        self._write("")
-        self._lines(f"model    {config.model}")
-        self._lines(f"ollama   {config.base_url}")
-        self._lines(f"project  {config.project_root}")
-        self._lines("programs projects/<name>")
-        self._lines(f"session  {session_id}")
-        self._write("")
-        self._write("try      build a clock")
-        self._write("plan     look only, no edits")
-        self._write("build    create files again")
-        self._write("handoff  plan, then build")
-        self._write("web      asked before a realistic web app")
-        self._write("run      compile, then launch")
-        self._write("exit     stop")
-        self._write("")
+
+    def status_bar(
+        self,
+        *,
+        model: str,
+        used: int,
+        limit: int,
+        phase: str,
+        title: str,
+        estimated: bool,
+        width: int | None = None,
+    ) -> None:
+        self._write(
+            format_status(
+                model=model,
+                used=used,
+                limit=limit,
+                phase=phase,
+                title=title,
+                estimated=estimated,
+                width=width if width is not None else self._width(),
+                color=self.color,
+            )
+        )
 
     def prompt_block(self, text: str) -> None:
         self._shown = set()
@@ -89,10 +108,14 @@ class Console:
         self.block("Prompt", text.strip())
 
     def event(self, item: LoopEvent) -> None:
+        if item.kind == "phase":
+            self.phase = item.text or self.phase
+            return
         if item.kind == "delta":
             self._status_once("Working", "Thinking")
             return
         if item.kind == "tokens":
+            self._note_tokens(item.text)
             return
         if item.kind in {"harness", "ollama"}:
             if item.title == "Result" or _is_problem(item.body or item.text):
@@ -133,7 +156,7 @@ class Console:
             return
         if body.startswith("Read "):
             path = body.splitlines()[0].removeprefix("Read ").strip()
-            self._status_once("Working", f"Reading {path}")
+            self._status_once("Working", f"┊ Reading {path}")
             return
         if "error:" in body or body.startswith("denied:") or body.startswith("Denied."):
             self.block("Result", _plain_problem(body))
@@ -164,16 +187,34 @@ class Console:
         self._write("-" * width)
 
     def ask(self, tool_name: str, detail: str) -> bool:
-        self.block("Needs a yes", approval_sentence(tool_name, detail))
+        sentence = approval_sentence(tool_name, detail)
+        width = min(self._width(), 72)
+        line = "+" + ("-" * (width - 2)) + "+"
+        self._write(self._hex(line, _BRONZE))
+        self._write(self._hex("| Needs a yes", _AMBER))
+        for row in sentence.splitlines():
+            self._write(self._hex("| " + row, _TEXT))
+        self._write(self._hex(line, _BRONZE))
         try:
-            answer = input("yes? [y/n] ")
+            answer = input("❯ ")
         except EOFError:
             self._write("")
             return False
         return answer.strip().lower() in {"y", "yes"}
 
     def read_prompt(self) -> str:
-        return input("you > ")
+        return input("❯ ")
+
+    def _note_tokens(self, text: str) -> None:
+        if "prompt=" not in text:
+            return
+        try:
+            self.used = int(text.split("prompt=", 1)[1].split()[0])
+        except (IndexError, ValueError):
+            return
+        self.estimated = "source=estimated" in text
+        if "thinking" not in self.phase:
+            self.phase = "running" if "tool_calls=" in text and not text.split("tool_calls=", 1)[-1].startswith("0") else "thinking"
 
     def _width(self) -> int:
         return min(max(shutil.get_terminal_size((72, 24)).columns, 40), 72)
@@ -196,6 +237,14 @@ class Console:
     def _write(self, text: str) -> None:
         print(text, file=self.out)
 
+    def _hex(self, text: str, color: str) -> str:
+        if not self.color:
+            return text
+        red = int(color[1:3], 16)
+        green = int(color[3:5], 16)
+        blue = int(color[5:7], 16)
+        return f"\033[38;2;{red};{green};{blue}m{text}\033[0m"
+
     def _paint(self, text: str, tone: str) -> str:
         if not self.color:
             return text
@@ -215,6 +264,57 @@ class Console:
         }
         code = codes.get(tone, "0")
         return f"\033[{code}m{text}\033[0m"
+
+
+def format_status(
+    *,
+    model: str,
+    used: int,
+    limit: int,
+    phase: str,
+    title: str,
+    estimated: bool,
+    width: int,
+    color: bool = False,
+) -> str:
+    """Hermes-style status line. Full at 76 columns, compact from 52, minimal below that."""
+    shown = (model or "model")[:26]
+    if width < 52:
+        return f"{shown}  {phase}"
+    safe_limit = limit if limit > 0 else 1
+    pct = min(100, int((used / safe_limit) * 100))
+    filled = min(10, int(round(pct / 10)))
+    bar = "[" + ("#" * filled) + ("-" * (10 - filled)) + "]"
+    mark = "~" if estimated else ""
+    painted = _paint_bar(bar, pct) if color else bar
+    core = f"{shown}  {mark}{used}/{safe_limit}  {painted} {pct}%  {phase}"
+    if width < 76 or not title:
+        return core
+    room = width - len(core) - 2
+    badge = title[: max(room, 0)]
+    if not badge:
+        return core
+    return core + "  " + badge
+
+
+def _paint_bar(bar: str, percent: int) -> str:
+    if percent >= 95:
+        color = "255;0;0"
+    elif percent >= 80:
+        color = "255;140;0"
+    elif percent >= 50:
+        color = "255;215;0"
+    else:
+        color = "50;205;50"
+    return f"\033[38;2;{color}m{bar}\033[0m"
+
+
+def _fit(text: str, width: int) -> str:
+    if len(text) <= width:
+        return text
+    if width <= 3:
+        return text[:width]
+    return text[: width - 3] + "..."
 
 
 def approval_sentence(tool_name: str, detail: str) -> str:

@@ -106,6 +106,9 @@
   <header>
     <h1>CodeHarness</h1>
     <p class="meta" id="meta">Loading the local session.</p>
+    <p class="meta" id="lead">Phase: ready</p>
+    <p class="meta" id="todos">Todos: none</p>
+    <p class="meta" id="queue">Queue: none</p>
   </header>
   <section class="meter">
     <p id="meter-label">Prompt tokens: 0</p>
@@ -123,6 +126,7 @@
       <button type="button" id="build">Build</button>
       <button type="button" id="launch">Launch</button>
       <button type="button" id="handoff">Handoff</button>
+      <button type="button" id="undo">Undo</button>
     </div>
     <div class="row">
       <textarea id="task" placeholder="Tell the harness what to change in this project."></textarea>
@@ -142,12 +146,15 @@
 
     function paint(state) {
       meta.textContent = state.model + " at " + state.server + " · " + (state.agent || "build") + " · session " + state.session_id + " · root " + state.root;
+      document.getElementById("lead").textContent = "Phase: " + (state.phase || "ready");
+      document.getElementById("todos").textContent = "Todos: " + ((state.todos && state.todos.length) ? state.todos.join(", ") : "none");
+      document.getElementById("queue").textContent = "Queue: " + ((state.queue && state.queue.length) ? state.queue.join(" | ") : "none");
       const limit = state.context_limit || 1;
       const used = state.latest_prompt || 0;
       const pct = Math.min(100, Math.round((used / limit) * 100));
       meterFill.style.width = pct + "%";
       meterLabel.textContent = "Latest prompt: " + used + " of " + limit + " tokens (" + state.token_source + "). Completion so far: " + state.completion_tokens + ". Tool calls: " + state.tool_calls + ".";
-      send.disabled = state.busy;
+      send.disabled = false;
       for (const id of ["plan", "build", "launch", "handoff"]) {
         document.getElementById(id).disabled = state.busy;
       }
@@ -201,6 +208,10 @@
     document.getElementById("plan").addEventListener("click", () => sendText("plan", false));
     document.getElementById("build").addEventListener("click", () => sendText("build", false));
     document.getElementById("launch").addEventListener("click", () => sendText("launch", false));
+    document.getElementById("undo").addEventListener("click", async () => {
+      await fetch("/api/undo", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
+      await refresh();
+    });
     document.getElementById("handoff").addEventListener("click", () => {
       const text = task.value.trim();
       if (!text) return;

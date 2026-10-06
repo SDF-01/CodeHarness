@@ -265,12 +265,14 @@ def test_plan_agent_does_not_write(tmp_path: Path) -> None:
         config=_config(tmp_path, permissions={**HarnessConfig().permissions, "write_file": "allow"}),
         ask=lambda name, detail: True,
     )
+    text = "\n".join(message.content for message in session.messages)
     seen = model.seen_tools[0]
     store.close()
     assert result.text == "A plan only."
     assert not (tmp_path / "app.py").exists()
+    assert "may write only PLAN.md" in text
     names = [tool["function"]["name"] for tool in seen]
-    assert "write_file" not in names
+    assert "write_file" in names
     assert "git_add" not in names
     assert "git_commit" not in names
 

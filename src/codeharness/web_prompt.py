@@ -25,10 +25,13 @@ WEB_GUI_QUESTION = (
     "Build this as a realistic web app with HTML, CSS, React, Tailwind, and shadcn?"
 )
 _YES = (
-    "Build a realistic web app in this project. "
-    "Use HTML, CSS, React, and Tailwind. "
-    "Use shadcn-style button, card, input, and dialog components. "
-    "Write an index.html that opens without an install. Do not use tkinter."
+    "Build a full stack app in this project. "
+    "Write index.html and server.py. "
+    "server.py uses the Python standard library http.server, serves this folder, "
+    "and answers GET /api/health with JSON on port 8766. "
+    "index.html uses HTML, CSS, React, and Tailwind, with shadcn-style button, card, input, and dialog components, "
+    "and it calls /api/health. "
+    "No install. Do not use tkinter."
 )
 _NO = "Build a local Python or Java program. Do not create a website."
 

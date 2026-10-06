@@ -1,6 +1,6 @@
 # CodeHarness status
 
-Date: 25 September 2026
+Date: 6 October 2026
 Version: 0.1.0
 Scope: the local coding harness in this repo
 
@@ -8,11 +8,11 @@ This report describes what the program does today. It is grounded in the source 
 
 ## Where it stands
 
-CodeHarness is a working local coding loop. You type a task. The harness sends a short prompt to a local OpenAI-compatible server, runs the model's tool calls, and stops when the model answers in plain text or hits the step limit.
+CodeHarness is a working local coding loop. The harness is the lead. The model works one todo. The done gate decides when to stop. A build writes a repo map, an optional `server.py` and `index.html` skeleton, and `PLAN.md`, then asks once before the file writes. Each todo is a fresh child. Diagnostics, a review child, and a live `GET /api/health` check can send that todo back. A passed gate appends a short note to the project `AGENTS.md`.
 
 Generated programs are saved under `projects/<name>/`. The harness folder stays the harness. `codeharness pull` downloads the configured model from a local Ollama server. `scripts/harness.ps1 up` starts Ollama, checks `.venv`, and runs that pull. Chat does not download on its own. Chat, eval, and the local page still need the server. The unit tests do not.
 
-Pytest on 25 September 2026: **82 passed** in 5.71s, using a fake model. That suite proves the loop, tools, permissions, context budget, sessions, display, git tools, the shell allowlist, handoff, language checks, project folders, and the eval fixtures. It does not prove that a live model writes a good program. A new program is judged by running that program.
+Pytest on 6 October 2026: **108 passed** in 7.84s, using a fake model. That suite proves the lead, the one-todo child, the patch tool, diagnostics, undo, the health gate, the queue, the CLI banner, the loop, permissions, sessions, handoff, project folders, the full stack branch chain, and the eval fixtures. It does not prove that a live model writes a good program. A new program is judged by running that program.
 
 ## What you can run
 
@@ -29,9 +29,10 @@ Pytest on 25 September 2026: **82 passed** in 5.71s, using a fake model. That su
 
 Inside `chat`:
 
-- `you >` is the prompt.
-- `plan` stops file creates, edits, staging, and commits. `build` allows them again.
-- `handoff` plus a task runs a plan turn, then a build turn that implements the plan.
+- `❯` is the prompt. `/help`, `/tools`, `/skills`, `/status`, `/context`, `/plan`, `/build`, `/undo`, and `/sessions` never call the model.
+- `plan` may write only `PLAN.md`. `build` can create and edit files again.
+- A build task goes through the lead. `handoff` plus a local task runs a plan turn, then a build turn that implements the plan. A full stack handoff runs route, page, API, and review as separate short sessions in the same project folder.
+- A message typed while a turn is running is queued. `undo` restores the latest snapshot.
 - `run`, `run it`, `launch`, and `launch it` compile, then start the program just written. A window that stays open is left running. A window that closes immediately is sent back so the model can repair it.
 - `exit` or `quit` ends the session.
 - Reads, searches, git status, and git diff run immediately. New files, edits, git add, git commit, and shell commands ask `y` or `n`. Shell may only start the current Python interpreter.
@@ -53,7 +54,7 @@ Ten tools, in `src/codeharness/tools`. Each returns a short string. A failure is
 | `list_files` | At most 80 paths | allow |
 | `write_file` | Create or replace a whole file. Reply is the path and line count | ask |
 | `edit_file` | Replace one exact `old_string`. Does not create a file | ask |
-| `shell` | Python, Java, Node, npm, or npx. Pipes and other programs are blocked | ask |
+| `shell` | Python, Java, Node, npm, npx, or a matching compiler. Pipes and other programs are blocked | ask |
 | `git_status` | Short git status | allow |
 | `git_diff` | Unstaged diff, optional path | allow |
 | `git_add` | Stage one path inside the project | ask |
@@ -116,11 +117,11 @@ Agents in `src/codeharness/agents`:
 
 - `build` may create and edit files. This is the default.
 - `plan` may read. `write_file`, `edit_file`, `git_add`, and `git_commit` are denied.
-- `handoff` runs plan, then switches to build and implements the plan text. An empty plan does not start the build.
+- `handoff` runs plan, then switches to build and implements the plan text, unless the task is a full stack app. Then it runs route, page, API, and review. An empty plan or an empty route does not start the next step.
 
 ### Review and launch
 
-`review.py` checks source the agent just wrote. Python is parsed and undefined names are reported. Java, HTML, CSS, JavaScript, JSX, and TypeScript are checked for structure. A one-line dump of escaped newlines is turned back into real source before that check. A non-tkinter Python file, and a Java file with `main`, then run for about 3 seconds. `run.py` launches the newest Python, Java, or HTML program. A tkinter window must stay open. An HTML file opens in the browser.
+`review.py` checks source the agent just wrote. Python is parsed and undefined names are reported. Java, HTML, CSS, JavaScript, JSX, and TypeScript are checked for structure. A full stack task must also include `index.html` and `server.py`, and the page must call `/api/`. A one-line dump of escaped newlines is turned back into real source before that check. A non-tkinter Python file, and a Java file with `main`, then run for about 3 seconds. An HTTP server is left running. `run.py` launches the newest Python, Java, or HTML program, or starts `server.py` and opens the page when both files are present.
 
 ### Local page
 
@@ -153,7 +154,7 @@ Runtime dependencies: the Python standard library. Dev extra: pytest. Python 3.1
 
 ## Limits that remain
 
-- The shell allowlist allows Python, Java, Node, npm, and npx. It does not stop code the user already approved. There is no container.
+- The shell allowlist allows Python, Java, Node, npm, npx, and the matching compilers. It does not stop code the user already approved. There is no container.
 - `codeharness pull` talks to Ollama. It does not download weights for LM Studio or llama.cpp. Chat does not pull on its own.
 - Name checks are a scope walk in this process. There is no language-server process.
 - Git tools can status, diff, add, and commit. They do not push.

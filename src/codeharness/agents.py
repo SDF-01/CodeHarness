@@ -39,13 +39,43 @@ def load_agents() -> dict[str, Agent]:
 AGENTS = load_agents()
 
 
+_READ_ONLY = ("edit_file", "write_file", "apply_patch", "git_add", "git_commit", "shell", "task", "todo")
+
+
 def config_for_agent(config: HarnessConfig, name: str) -> HarnessConfig:
-    """Plan cannot create or edit files. Other agents keep the configured permissions."""
-    if name != "plan":
-        return config
+    """Each agent is a permission set. Denied tools are omitted from its prompt."""
     permissions = dict(config.permissions)
-    permissions["edit_file"] = "deny"
-    permissions["write_file"] = "deny"
-    permissions["git_add"] = "deny"
-    permissions["git_commit"] = "deny"
-    return replace(config, permissions=permissions)
+    only_path = ""
+    if name == "plan":
+        permissions["write_file"] = "allow"
+        permissions["edit_file"] = "allow"
+        permissions["apply_patch"] = "deny"
+        permissions["git_add"] = "deny"
+        permissions["git_commit"] = "deny"
+        permissions["shell"] = "deny"
+        permissions["task"] = "deny"
+        only_path = "PLAN.md"
+    elif name == "route":
+        for tool in ("edit_file", "write_file", "apply_patch", "git_add", "git_commit", "shell", "task"):
+            permissions[tool] = "deny"
+    elif name == "explore":
+        for tool in _READ_ONLY:
+            permissions[tool] = "deny"
+    elif name == "review":
+        for tool in ("write_file", "apply_patch", "git_add", "git_commit", "task", "todo"):
+            permissions[tool] = "deny"
+    elif name == "general":
+        permissions["task"] = "deny"
+    elif name == "page":
+        permissions["git_add"] = "deny"
+        permissions["git_commit"] = "deny"
+        permissions["task"] = "deny"
+        only_path = "index.html"
+    elif name == "api":
+        permissions["git_add"] = "deny"
+        permissions["git_commit"] = "deny"
+        permissions["task"] = "deny"
+        only_path = "server.py"
+    else:
+        return config
+    return replace(config, permissions=permissions, only_path=only_path)

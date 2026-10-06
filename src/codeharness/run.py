@@ -13,6 +13,7 @@ from pathlib import Path
 
 from codeharness.config import HarnessConfig
 from codeharness.projects import launch_root
+from codeharness.stack import STACK_PORT, listen_port, serves_http
 from codeharness.tools import shell
 
 RUN_COMMANDS = {"run", "run it", "launch", "launch it"}
@@ -29,6 +30,9 @@ def compile_and_launch(config: HarnessConfig) -> tuple[int, str]:
         nested = launch_root(config.project_root)
         if nested is not None:
             config = replace(config, project_root=nested)
+        stacked = _launch_stack(config)
+        if stacked is not None:
+            return stacked
         target = _newest_program(config.project_root)
         if target is not None and target.suffix.lower() == ".java":
             return _launch_java(target, config.project_root)
@@ -49,6 +53,27 @@ def compile_and_launch(config: HarnessConfig) -> tuple[int, str]:
     ok, launched = _start_program(launch, config.project_root)
     status = "Launch passed." if ok else "Launch failed."
     return (0 if ok else 1), f"Compile passed.\n{status}\n{launch}\n{launched}"
+
+
+def _launch_stack(config: HarnessConfig) -> tuple[int, str] | None:
+    """Start server.py and open the page when this folder is a full stack app."""
+    root = config.project_root
+    server = root / "server.py"
+    page = root / "index.html"
+    if not server.is_file() or not page.is_file() or not serves_http(server):
+        return None
+    source = server.read_text(encoding="utf-8", errors="replace")
+    port = listen_port(source)
+    if port == 0:
+        port = STACK_PORT
+    subprocess.Popen(
+        [sys.executable, str(server)],
+        cwd=root.resolve(),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    webbrowser.open(f"http://127.0.0.1:{port}/")
+    return 0, f"Opened http://127.0.0.1:{port}/ in your browser. The API is running."
 
 
 def _launch_command(config: HarnessConfig) -> str:
@@ -206,6 +231,57 @@ def probe_java(path: Path, root: Path) -> str:
     detail = (output or "").strip().splitlines()
     line = detail[-1] if detail else f"exit_code={process.returncode}"
     return f"error: {path.name} failed at runtime. {line}"
+
+
+_COMPILED = {
+    ".c": ("gcc", ["gcc", "-fsyntax-only"]),
+    ".cpp": ("g++", ["g++", "-fsyntax-only"]),
+    ".go": ("gofmt", ["gofmt", "-e"]),
+    ".rb": ("ruby", ["ruby", "-c"]),
+    ".php": ("php", ["php", "-l"]),
+    ".swift": ("swiftc", ["swiftc", "-typecheck"]),
+}
+
+
+def probe_compiled(path: Path, root: Path) -> str:
+    """Compile a source file when its compiler is installed. A missing compiler is not a model error."""
+    spec = _COMPILED.get(path.suffix.lower())
+    if path.suffix.lower() == ".rs":
+        if shutil.which("rustc") is None or not path.is_file():
+            return ""
+        with tempfile.TemporaryDirectory() as raw:
+            return _compile_result(
+                path,
+                root,
+                ["rustc", "--edition", "2021", "--crate-type", "lib", "--out-dir", raw, str(path.resolve())],
+            )
+    if path.suffix.lower() == ".kt":
+        if shutil.which("kotlinc") is None or not path.is_file():
+            return ""
+        with tempfile.TemporaryDirectory() as raw:
+            return _compile_result(path, root, ["kotlinc", str(path.resolve()), "-d", raw])
+    if spec is None or not path.is_file():
+        return ""
+    tool, argv = spec
+    if shutil.which(tool) is None:
+        return ""
+    return _compile_result(path, root, [*argv, str(path.resolve())])
+
+
+def _compile_result(path: Path, root: Path, argv: list[str]) -> str:
+    compiled = subprocess.run(
+        argv,
+        cwd=root.resolve(),
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    if compiled.returncode == 0:
+        return ""
+    detail = (compiled.stderr or compiled.stdout or "compile failed").strip().splitlines()
+    line = detail[-1] if detail else "compile failed"
+    return f"error: {path.name} failed to compile. {line}"
 
 
 def probe_program(path: Path, root: Path) -> str:

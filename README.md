@@ -6,13 +6,27 @@ It talks to any local server that speaks the OpenAI chat completions API. Point 
 
 Python 3.10 or newer. The package itself uses the Python standard library. The only extra install is pytest, and that is a development dependency.
 
+## The harness leads
+
+A build is not one long chat. The harness is the lead. The local model is the worker for one step.
+
+1. The harness writes a short repo map and, when the folder should be a web app and has no `server.py`, writes `server.py` and `index.html` itself.
+2. A plan child may write only `PLAN.md`.
+3. You approve that plan once. Shell commands still ask every time.
+4. Each open todo gets a fresh child. That child does not see the rest of the chat.
+5. Diagnostics and a review child decide whether the todo is done. The model does not declare success.
+6. If `server.py` exists, the harness requests `GET /api/health` and requires HTTP 200 and JSON.
+7. A passed gate appends a short note to that project's `AGENTS.md`.
+
+A one-line edit that names a file already in the folder stays a single turn. `handoff` of a local program still plans, then builds. `handoff` of a full stack task still runs the page, API, and review branches.
+
 ## What a turn does
 
 1. You type a task.
-2. The harness builds a short prompt from the session, the matching skills, and the rules.
+2. The harness builds a short prompt from the session, the matching skills, and the rules. Skill names are listed. The `skill` tool loads one body when the worker asks.
 3. It sends that prompt to the model at temperature 0.
-4. If the model calls a tool, the harness checks permission, runs the tool, and sends the result back.
-5. That repeats until the model answers in plain text, or the turn hits `max_steps` (default 12).
+4. If the model calls a tool, the harness checks permission, runs the tool, and sends the result back. Read, search, and list calls from the same step run together.
+5. That repeats until the model answers in plain text, or the turn hits `max_steps` (default 12). The limit applies to one child, not to the whole build.
 
 Reads and searches run immediately. Creating a file, editing a file, staging, committing, and running a shell command ask you first. You answer `y` or `n`.
 
@@ -55,7 +69,7 @@ That starts Ollama if port 11434 is closed, checks that `.venv` exists, and runs
 |---|---|
 | `test` | Runs pytest with a fake model. Ollama is not required. |
 | `eval` | Scores the live model on the sample tasks, including a tkinter clock that is checked without opening a window. |
-| `chat` | Terminal session. Type a task at `you >`. Type `exit` or `quit` to stop. |
+| `chat` | Terminal session. Type a task at `❯`, or `/help` for commands. Type `exit` or `quit` to stop. |
 | `run` | Compiles, then starts the newest program in the current project folder. |
 | `ui` | Opens http://127.0.0.1:8765/ with the same stages, a token meter, and Allow or Deny. |
 | `up` | Starts Ollama if needed, checks `.venv`, and pulls the configured model. |
@@ -85,7 +99,7 @@ codeharness chat --session SESSION_ID
 
 Before a build that has not already named a stack, the harness asks whether you want a realistic web app.
 
-- Yes writes `index.html` with HTML, CSS, React, Tailwind, and shadcn-style pieces. No install step.
+- Yes starts a full stack app: a page branch writes `index.html` with HTML, CSS, React, Tailwind, and shadcn-style pieces, then an API branch writes `server.py`. No install step.
 - No keeps the program as local Python or Java, and does not create a website.
 
 The local page has the same Plan, Build, Launch, and Handoff actions.
@@ -102,12 +116,21 @@ The harness can write and check:
 | CSS | `.css` | Must be non-empty, with balanced braces. |
 | JavaScript and JSX | `.js`, `.mjs`, `.cjs`, `.jsx` | Must be non-empty, with balanced brackets. |
 | TypeScript | `.ts`, `.tsx` | Same structural check as JavaScript. |
+| C and C++ | `.c`, `.cpp` | Non-empty and balanced. `gcc` or `g++` checks syntax when it is installed. |
+| C# | `.cs` | Non-empty and balanced. A declared type must match the file name. |
+| Go | `.go` | Non-empty and balanced. A declared type must match the file name. `gofmt` checks syntax when it is installed. |
+| Rust | `.rs` | Non-empty and balanced. `rustc` checks the file when it is installed. |
+| Ruby and PHP | `.rb`, `.php` | Non-empty and balanced. `ruby -c` or `php -l` runs when that tool is installed. |
+| Kotlin and Swift | `.kt`, `.swift` | Non-empty and balanced. `kotlinc` or `swiftc` checks the file when it is installed. |
+| SQL | `.sql` | Non-empty and balanced. The file is not executed. |
 
-React, Tailwind, and shadcn are not separate compilers here. They are written into `index.html` so the page opens without `npm install`.
+React, Tailwind, and shadcn are not separate compilers here. They are written into `index.html`. Saying yes to a realistic web app makes that page a full stack app: `index.html` calls `GET /api/health`, and `server.py` answers it with the Python standard library on port 8766. No install. Launch starts that server and opens `http://127.0.0.1:8766/`. A Python file that stays running as an HTTP server is not treated as a crashed script.
+
+A build goes through the lead: repo map, optional scaffold, `PLAN.md`, one approval, then one todo at a time. `handoff` of a full stack task still runs a short route, then a page branch, an API branch, and a review, one after another, in the same `projects/<name>/` folder. Each branch has its own session. A route or branch that comes back empty does not start the next one. Read, search, and list calls from the same model step run together. Writes stay in order.
 
 A one-line dump of escaped newlines is turned back into real lines before those checks. If the check fails, the error is sent back to the model and the turn does not finish yet.
 
-Shell commands may start Python, Java, `javac`, Node, npm, or npx. Pipes, redirects, backticks, and other programs are blocked. Approval is still required. `pip install` of a module that already ships with Python, such as tkinter, is rejected before it runs.
+Shell commands may start Python, Java, `javac`, Node, npm, npx, `gcc`, `g++`, `dotnet`, `go`, `gofmt`, `rustc`, `ruby`, `php`, `kotlinc`, or `swiftc`. Pipes, redirects, backticks, and other programs are blocked. Approval is still required. `pip install` of a module that already ships with Python, such as tkinter, is rejected before it runs. A missing compiler does not fail a file that already balances.
 
 ## Where programs are saved
 
@@ -131,7 +154,7 @@ Each tool returns a short string. A failure is also a string, so the model can t
 | `list_files` | At most 80 paths | allow |
 | `write_file` | Create or replace a whole file. The reply is the path and the line count | ask |
 | `edit_file` | Replace one exact `old_string`. It does not create a file | ask |
-| `shell` | Python, Java, Node, npm, or npx, after you approve | ask |
+| `shell` | Python, Java, Node, npm, npx, or a matching compiler, after you approve | ask |
 | `git_status` | Short git status | allow |
 | `git_diff` | Unstaged diff, optional path | allow |
 | `git_add` | Stage one existing path inside the project | ask |
@@ -177,6 +200,12 @@ The session store keeps every message in SQLite at `.codeharness/sessions.db` in
 If the server sends `usage.prompt_tokens` and `usage.completion_tokens`, those numbers are the token meter. If it does not, the harness estimates from character length and labels the line `source=estimated`.
 
 `codeharness chat --session ID` loads a saved history and continues. `codeharness sessions` lists sessions for the workspace.
+
+## Speed
+
+Each model call caps the reply at `response_reserve` tokens, so a turn does not wait on a long essay. The system prompt also tells the model to write a new file in one `write_file` call.
+
+When `base_url` is Ollama (port 11434), the same call sets the context window to `context_limit` and asks Ollama to keep the model loaded for 30 minutes. The next turn skips the reload. A smaller `context_limit` in `codeharness.json` makes that window, and each step, shorter.
 
 ## Eval
 
@@ -250,7 +279,7 @@ Follow one chat turn in this order:
 - It does not run a real language server, a container, or a package installer for the programs it writes.
 - It does not push git remotes. `git_commit` commits what is already staged.
 - It does not treat the harness pytest suite as proof that a generated program works. Run that program.
-- Shell cannot start arbitrary programs. The allowlist is Python, Java, Node, npm, and npx.
+- Shell cannot start arbitrary programs. The allowlist is Python, Java, Node, npm, npx, and the matching compilers for C, C++, Go, Rust, Ruby, PHP, Kotlin, and Swift.
 
 ## Tests
 

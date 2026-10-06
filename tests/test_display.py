@@ -1,7 +1,7 @@
 from io import StringIO
 
 from codeharness.config import HarnessConfig
-from codeharness.display import Console, approval_sentence
+from codeharness.display import Console, approval_sentence, format_status
 from codeharness.loop import LoopEvent, run_turn
 from codeharness.model import Completion, ToolCall
 from codeharness.session import SessionStore, database_path
@@ -52,12 +52,13 @@ def test_banner_names_the_path() -> None:
     view = Console(out=buffer, color=False)
     view.banner(HarnessConfig(model="qwen2.5-coder:7b"), "abc123")
     text = buffer.getvalue()
-    assert "[o_o]" in text
-    assert "CodeHarness" in text
+    assert "CODEHARNESS" in text
+    assert "Available Tools" in text
+    assert "Available Skills" in text
     assert "qwen2.5-coder:7b" in text
-    assert "Prompt > Harness > Ollama > files" in text
-    assert "You type at >" in text
-    assert "What should we build?" in text
+    assert "session abc123" in text
+    assert "/help" in text
+    assert "\033[" not in text
 
 
 def test_token_lines_stay_out_of_the_blocks() -> None:
@@ -67,6 +68,41 @@ def test_token_lines_stay_out_of_the_blocks() -> None:
     view.event(LoopEvent("tokens", "turn tokens: prompt=1 completion=1 tool_calls=0 source=api"))
     text = buffer.getvalue()
     assert "prompt=1" not in text
+
+
+def test_status_bar_shortens_below_52_columns() -> None:
+    wide = format_status(
+        model="qwen2.5-coder:7b",
+        used=100,
+        limit=1000,
+        phase="running",
+        title="clock",
+        estimated=True,
+        width=80,
+    )
+    compact = format_status(
+        model="qwen2.5-coder:7b",
+        used=100,
+        limit=1000,
+        phase="running",
+        title="clock",
+        estimated=False,
+        width=60,
+    )
+    narrow = format_status(
+        model="qwen2.5-coder:7b",
+        used=100,
+        limit=1000,
+        phase="review",
+        title="clock",
+        estimated=False,
+        width=40,
+    )
+    assert "clock" in wide
+    assert "~100/1000" in wide
+    assert "clock" not in compact
+    assert "100/1000" in compact
+    assert narrow == "qwen2.5-coder:7b  review"
 
 
 def test_approval_names_the_file_not_the_tool() -> None:

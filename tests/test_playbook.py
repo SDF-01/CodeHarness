@@ -10,7 +10,7 @@ def test_a_build_request_loads_vibe_and_rules() -> None:
     text = coaching_for("build a digital / analog clock")
     assert "vibe-build" in text
     assert "Rules:" in text
-    assert "write_file" in text
+    assert "skill tool" in text
 
 
 def test_skill_and_agent_files_keep_their_schema() -> None:
@@ -18,7 +18,21 @@ def test_skill_and_agent_files_keep_their_schema() -> None:
         "vibe-build",
         "gui-app",
         "web-app",
+        "fullstack",
         "java",
+        "c",
+        "cpp",
+        "csharp",
+        "go",
+        "rust",
+        "ruby",
+        "php",
+        "kotlin",
+        "swift",
+        "sql",
+        "structure",
+        "engineering",
+        "interface",
         "verify",
         "stdlib",
         "opencode",
@@ -38,6 +52,19 @@ def test_skills_are_ranked_and_capped_at_four() -> None:
     assert many == ["stdlib", "vibe-build", "gui-app", "verify"]
 
 
+def test_a_screen_loads_the_interface_skill() -> None:
+    names = [skill.name for skill in select_skills("design a button with a label")]
+    assert "interface" in names
+
+
+def test_short_language_names_match_whole_words() -> None:
+    assert "go" in [skill.name for skill in select_skills("write a go program")]
+    assert "go" not in [skill.name for skill in select_skills("build a clock")]
+    sharp = [skill.name for skill in select_skills("write a c# program")]
+    assert "csharp" in sharp
+    assert "c" not in sharp
+
+
 def test_web_and_java_skills_match_their_stacks() -> None:
     web = [skill.name for skill in select_skills("build a page with react tailwind and shadcn")]
     assert web[0] == "web-app"
@@ -48,6 +75,14 @@ def test_web_and_java_skills_match_their_stacks() -> None:
     assert not offer_web_gui("fix the bug")
     assert "index.html" in apply_web_choice("build an atm", True)
     assert "Do not create a website." in apply_web_choice("build an atm", False)
+
+
+def test_a_branch_loads_one_skill() -> None:
+    page = coaching_for("build a full stack notes app", "page").splitlines()[0]
+    api = coaching_for("build a full stack notes app", "api").splitlines()[0]
+    assert page == "Active skills: web-app"
+    assert api == "Active skills: fullstack"
+    assert coaching_for("build a clock").splitlines()[0].startswith("Active skills: vibe-build")
 
 
 def test_a_greeting_loads_no_skill() -> None:
@@ -99,4 +134,4 @@ def test_plan_agent_is_told_not_to_edit(tmp_path) -> None:
         config,
         agent="plan",
     ).messages[0]["content"]
-    assert "Do not create or edit files." in prompt
+    assert "You may write only PLAN.md." in prompt

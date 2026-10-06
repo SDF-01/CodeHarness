@@ -8,7 +8,20 @@ from pathlib import Path
 
 from codeharness.config import HarnessConfig
 from codeharness.errors import PathEscape, ToolInputError
-from codeharness.tools import edit_file, git, list_files, read_file, search, shell, write_file
+from codeharness.tools import (
+    apply_patch,
+    diagnostics_tool,
+    edit_file,
+    git,
+    list_files,
+    read_file,
+    search,
+    shell,
+    skill_tool,
+    task_tool,
+    todo_tool,
+    write_file,
+)
 
 Runner = Callable[[dict, Path, HarnessConfig], str]
 
@@ -78,7 +91,7 @@ TOOLS: dict[str, Tool] = {
         ),
         _tool(
             "shell",
-            "Run Python, Java, Node, npm, or npx in the project directory. Other programs are blocked.",
+            "Run Python, Java, Node, npm, npx, or a matching compiler in the project directory. Other programs are blocked.",
             {"command": {"type": "string"}},
             ["command"],
             shell.run,
@@ -110,6 +123,53 @@ TOOLS: dict[str, Tool] = {
             {"message": {"type": "string"}},
             ["message"],
             git.commit,
+        ),
+        _tool(
+            "apply_patch",
+            "Apply several exact hunks. Each hunk has path, old_string, and new_string.",
+            {
+                "hunks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "old_string": {"type": "string"},
+                            "new_string": {"type": "string"},
+                        },
+                    },
+                }
+            },
+            ["hunks"],
+            apply_patch.run,
+        ),
+        _tool(
+            "skill",
+            "Load one skill body by name. The prompt lists names only.",
+            {"name": {"type": "string"}},
+            ["name"],
+            skill_tool.run,
+        ),
+        _tool(
+            "diagnostics",
+            "Check project files the same way the done gate does. Pass path to check one file.",
+            {"path": {"type": "string"}},
+            [],
+            diagnostics_tool.run,
+        ),
+        _tool(
+            "todo",
+            "List the checklist, or mark one item done.",
+            {"action": {"type": "string"}, "text": {"type": "string"}},
+            [],
+            todo_tool.run,
+        ),
+        _tool(
+            "task",
+            "Run explore, review, or general in a fresh child session. The reply is a short summary.",
+            {"agent": {"type": "string"}, "prompt": {"type": "string"}},
+            ["agent", "prompt"],
+            task_tool.run,
         ),
     )
 }

@@ -76,6 +76,14 @@ def _chat(args: argparse.Namespace) -> int:
             return _one_turn(store, session, args.message, model, config, view)
         while True:
             try:
+                view.status_bar(
+                    model=config.model,
+                    used=view.used,
+                    limit=config.context_limit,
+                    phase=view.phase,
+                    title=session.title if session.title != "new session" else "",
+                    estimated=view.estimated,
+                )
                 line = view.read_prompt()
             except EOFError:
                 print()

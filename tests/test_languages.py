@@ -3,7 +3,7 @@ from codeharness.languages import text_problem
 from codeharness.loop import run_turn
 from codeharness.model import Completion, ToolCall
 from codeharness.review import source_problem
-from codeharness.run import compile_and_launch, probe_java
+from codeharness.run import compile_and_launch, probe_compiled, probe_java
 from codeharness.session import SessionStore, database_path
 from codeharness.tools import write_file
 from tests.fakes import ScriptedModel
@@ -30,6 +30,42 @@ def test_java_html_css_and_script_problems(tmp_path) -> None:
 
     script.write_text("const ok = () => 1\n", encoding="utf-8")
     assert source_problem(script) is None
+
+
+def test_go_and_rust_must_balance(tmp_path) -> None:
+    go = tmp_path / "main.go"
+    go.write_text("package main {\n", encoding="utf-8")
+    assert "unbalanced" in (text_problem(go, go.read_text(encoding="utf-8")) or "")
+    rust = tmp_path / "main.rs"
+    rust.write_text("fn main() {\n", encoding="utf-8")
+    assert "unbalanced" in (text_problem(rust, rust.read_text(encoding="utf-8")) or "")
+    typed = tmp_path / "Hello.go"
+    typed.write_text("package main\ntype Other struct{}\n", encoding="utf-8")
+    assert "must declare Hello" in (text_problem(typed, typed.read_text(encoding="utf-8")) or "")
+    plain = tmp_path / "main.go"
+    plain.write_text("package main\nfunc main() {}\n", encoding="utf-8")
+    assert text_problem(plain, plain.read_text(encoding="utf-8")) is None
+
+
+def test_a_missing_compiler_does_not_fail_the_file(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "main.go"
+    path.write_text("package main\nfunc main() {}\n", encoding="utf-8")
+    monkeypatch.setattr("codeharness.run.shutil.which", lambda name: None)
+    assert probe_compiled(path, tmp_path) == ""
+
+
+def test_a_compiler_error_is_reported(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "main.go"
+    path.write_text("package main\nfunc main() {}\n", encoding="utf-8")
+    monkeypatch.setattr("codeharness.run.shutil.which", lambda name: "gofmt")
+
+    class Result:
+        returncode = 1
+        stderr = "syntax error"
+        stdout = ""
+
+    monkeypatch.setattr("codeharness.run.subprocess.run", lambda *args, **kwargs: Result())
+    assert "failed to compile" in probe_compiled(path, tmp_path)
 
 
 def test_write_file_repairs_escaped_java_newlines(tmp_path) -> None:

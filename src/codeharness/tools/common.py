@@ -24,6 +24,17 @@ def cap_text(text: str, limit: int) -> str:
     return text[:limit] + "\n[truncated]"
 
 
+def only_path_error(config, path: Path, root: Path) -> str:
+    """Empty when this agent may write the path. Otherwise an error string."""
+    allowed = getattr(config, "only_path", "") or ""
+    if not allowed:
+        return ""
+    rel = path.relative_to(root.resolve()).as_posix()
+    if rel == allowed or path.name == allowed:
+        return ""
+    return f"error: this agent may write only {allowed}"
+
+
 def require_str(arguments: dict, field: str) -> str:
     value = arguments.get(field)
     if not isinstance(value, str) or not value:

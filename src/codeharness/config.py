@@ -20,6 +20,11 @@ DEFAULT_PERMISSIONS = {
     "git_add": "ask",
     "git_commit": "ask",
     "doom_loop": "ask",
+    "apply_patch": "ask",
+    "skill": "allow",
+    "diagnostics": "allow",
+    "todo": "allow",
+    "task": "ask",
 }
 
 SETUP_HELP = """No model is configured.
@@ -53,6 +58,7 @@ class HarnessConfig:
     launch_command: str = ""
     open_windows: bool = True
     permissions: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_PERMISSIONS))
+    only_path: str = ""
 
     @property
     def prompt_budget(self) -> int:

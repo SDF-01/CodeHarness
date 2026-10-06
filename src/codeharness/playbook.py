@@ -14,7 +14,29 @@ from pathlib import Path
 from codeharness.frontmatter import as_bool, split_frontmatter
 
 _PACKAGE = Path(__file__).resolve().parent
-_SKILL_ORDER = ("vibe-build", "gui-app", "web-app", "java", "verify", "stdlib", "opencode")
+_SKILL_ORDER = (
+    "vibe-build",
+    "gui-app",
+    "web-app",
+    "fullstack",
+    "java",
+    "c",
+    "cpp",
+    "csharp",
+    "go",
+    "rust",
+    "ruby",
+    "php",
+    "kotlin",
+    "swift",
+    "sql",
+    "structure",
+    "engineering",
+    "interface",
+    "verify",
+    "stdlib",
+    "opencode",
+)
 _WHEN_STOP = {
     "the",
     "user",
@@ -33,6 +55,7 @@ _WHEN_STOP = {
 _AGENTS_CAP = 600
 _LESSON_LIMIT = 3
 _SKILL_CAP = 4
+_BRANCH_SKILL = {"route": "structure", "page": "web-app", "api": "fullstack", "review": "verify"}
 
 
 @dataclass(frozen=True)
@@ -93,17 +116,22 @@ def load_rules() -> tuple[Rule, ...]:
     return tuple(loaded)
 
 
-def coaching_for(task: str) -> str:
-    """Return the shared rules and the highest scoring skills. Empty when nothing matches."""
-    selected = select_skills(task)
+def coaching_for(task: str, agent: str = "build") -> str:
+    """Return the shared rules and the skills for this turn. A branch loads one skill."""
+    if agent in _BRANCH_SKILL:
+        selected = [skill for skill in SKILLS if skill.name == _BRANCH_SKILL[agent]]
+    else:
+        selected = select_skills(task)
     if not selected:
         return ""
     names = ", ".join(skill.name for skill in selected)
-    lines = [f"Active skills: {names}", f"Rules: {always_rule_text()}"]
+    lines = [
+        f"Active skills: {names}",
+        "Ask the skill tool for a skill body before you rely on it.",
+        f"Rules: {always_rule_text()}",
+    ]
     for skill in selected:
         lines.append(f"{skill.name}: {skill.description}")
-        if skill.body:
-            lines.append(skill.body)
     return "\n".join(lines)
 
 
@@ -114,10 +142,25 @@ def select_skills(task: str) -> list[Skill]:
     ranked: list[tuple[int, int, Skill]] = []
     for index, skill in enumerate(SKILLS):
         hits = sum(1 for trigger in skill.triggers if trigger in words or trigger in text)
+        hits += _language_hits(skill.name, words, text)
         if hits:
             ranked.append((hits, index, skill))
     ranked.sort(key=lambda item: (-item[0], item[1]))
     return [skill for _, _, skill in ranked[:_SKILL_CAP]]
+
+
+def _language_hits(name: str, words: set[str], text: str) -> int:
+    """Match short language names as whole words so a letter does not hit every task."""
+    hits = 0
+    if name == "c" and "c" in words and "c#" not in text and "c++" not in text:
+        hits += 1
+    if name == "cpp" and ("cpp" in words or "c++" in text):
+        hits += 1
+    if name == "csharp" and ("csharp" in words or "dotnet" in words or "c#" in text):
+        hits += 1
+    if name == "go" and ("go" in words or "golang" in words):
+        hits += 1
+    return hits
 
 
 def prompt_addons(
@@ -129,7 +172,7 @@ def prompt_addons(
 ) -> str:
     """Text added under the base system prompt. At most four skills are included."""
     parts: list[str] = []
-    coaching = coaching_for(task)
+    coaching = coaching_for(task, agent)
     if coaching:
         parts.append(coaching)
     else:
@@ -143,7 +186,19 @@ def prompt_addons(
     if project:
         parts.append(project)
     if agent == "plan":
-        parts.append("Agent: plan. Do not create or edit files.")
+        parts.append("Agent: plan. You may write only PLAN.md.")
+    elif agent == "route":
+        parts.append("Agent: route. Name the branches. Do not create or edit files.")
+    elif agent == "page":
+        parts.append("Agent: page. Write the page only.")
+    elif agent == "api":
+        parts.append("Agent: api. Write the API only.")
+    elif agent == "review":
+        parts.append("Agent: review. Edit a file only if it is wrong. Do not create a new file.")
+    elif agent == "explore":
+        parts.append("Agent: explore. Read only. Return a short summary.")
+    elif agent == "general":
+        parts.append("Agent: general. Do the current todo. Do not start another task.")
     recent = [item for item in (lessons or []) if item][-_LESSON_LIMIT:]
     if recent:
         parts.append("Lessons:\n" + "\n".join(f"- {item}" for item in recent))
@@ -200,7 +255,14 @@ def lesson_from_failure(text: str) -> str:
     if "valid python" in lower or "syntax" in lower:
         return "Fix the Python syntax before answering."
     first = text.strip().splitlines()[0] if text.strip() else "A step failed."
-    for prefix in ("error:", "Shell failed.", "Review failed.", "Window failed.", "Run failed."):
+    for prefix in (
+        "error:",
+        "Shell failed.",
+        "Review failed.",
+        "Window failed.",
+        "Run failed.",
+        "Stack failed.",
+    ):
         if first.startswith(prefix):
             first = first[len(prefix) :].strip()
     return first[:140]

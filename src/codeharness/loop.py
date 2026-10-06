@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -16,7 +17,9 @@ from codeharness.model import ChatModel, Completion, ToolCall
 from codeharness.permissions import AskFunc, PermissionGate
 from codeharness.playbook import coaching_for, lesson_from_failure, wants_harness_tests
 from codeharness.review import brief_report, review_paths
-from codeharness.run import open_window, probe_java, probe_program, python_script, uses_tkinter
+from codeharness.runtime import TurnRuntime, bind_runtime, reset_runtime
+from codeharness.run import open_window, probe_compiled, probe_java, probe_program, python_script, uses_tkinter
+from codeharness.stack import serves_http, stack_problem
 from codeharness.session import Session, SessionStore, StoredMessage
 from codeharness.tools import run_tool, shell, tools_for_model
 
@@ -52,6 +55,8 @@ class TurnResult:
 
 EventHandler = Callable[[LoopEvent], None]
 
+_PARALLEL = frozenset({"read_file", "search", "list_files", "git_status", "git_diff", "diagnostics", "skill"})
+
 
 def format_usage(usage: Usage, prefix: str = "tokens") -> str:
     source = "estimated" if usage.estimated else "api"
@@ -71,6 +76,36 @@ def run_turn(
     config: HarnessConfig,
     ask: AskFunc,
     on_event: EventHandler | None = None,
+    note: str = "",
+) -> TurnResult:
+    token = bind_runtime(
+        TurnRuntime(store=store, session=session, model=model, config=config, ask=ask, on_event=on_event)
+    )
+    try:
+        return _run_turn(
+            store=store,
+            session=session,
+            user_text=user_text,
+            model=model,
+            config=config,
+            ask=ask,
+            on_event=on_event,
+            note=note,
+        )
+    finally:
+        reset_runtime(token)
+
+
+def _run_turn(
+    *,
+    store: SessionStore,
+    session: Session,
+    user_text: str,
+    model: ChatModel,
+    config: HarnessConfig,
+    ask: AskFunc,
+    on_event: EventHandler | None = None,
+    note: str = "",
 ) -> TurnResult:
     if session.title == "new session" and user_text.strip():
         store.set_title(session, user_text.strip().splitlines()[0][:60])
@@ -87,21 +122,36 @@ def run_turn(
     advice_sent = False
 
     for _step in range(config.max_steps):
-        built = build_context(session.messages, config, lessons=store.lessons(session), agent=agent_name)
+        built = build_context(
+            session.messages,
+            config,
+            lessons=store.lessons(session),
+            agent=agent_name,
+            note=note,
+        )
         _emit(
             on_event,
             LoopEvent(
                 "harness",
                 f"harness: {built.estimated_tokens} tokens, {len(schemas)} tools",
                 title="Harness",
-                body=_harness_body(built, schemas, config, user_text),
+                body=_harness_body(built, schemas, config, user_text, agent_name),
             ),
         )
-        completion = model.complete(
-            built.messages,
-            schemas,
-            on_delta=lambda piece: _emit(on_event, LoopEvent("delta", piece, title="Ollama", body=piece)),
-        )
+        store.append(session, StoredMessage(role="assistant", content="interrupted"))
+        keep_interrupted = False
+        try:
+            completion = model.complete(
+                built.messages,
+                schemas,
+                on_delta=lambda piece: _emit(on_event, LoopEvent("delta", piece, title="Ollama", body=piece)),
+            )
+        except Exception:
+            keep_interrupted = True
+            raise
+        finally:
+            if not keep_interrupted:
+                store.drop_interrupted(session)
         step_usage = _step_usage(completion, built.messages)
         usage.add_step(
             step_usage.prompt_tokens,
@@ -120,7 +170,7 @@ def run_turn(
             ),
         )
         if not completion.tool_calls:
-            problems = review_paths(written)
+            problems = "" if agent_name in {"general", "review", "explore", "plan"} else review_paths(written)
             if problems:
                 _remember(store, session, problems)
                 _send_back(store, session, "Review failed.", problems, on_event)
@@ -136,7 +186,16 @@ def run_turn(
                 _remember(store, session, window_problem)
                 _send_back(store, session, "Window failed.", window_problem, on_event)
                 continue
-            runtime_problem = _runtime_pending(written, config.project_root)
+            stack = ""
+            if agent_name not in {"plan", "route", "general", "review", "explore"}:
+                stack = stack_problem(config.project_root, user_text)
+            if stack:
+                _remember(store, session, stack)
+                _send_back(store, session, "Stack failed.", stack, on_event)
+                continue
+            runtime_problem = ""
+            if agent_name not in {"general", "review", "explore", "plan"}:
+                runtime_problem = _runtime_pending(written, config.project_root)
             if runtime_problem:
                 _remember(store, session, runtime_problem)
                 _send_back(store, session, "Run failed.", runtime_problem, on_event)
@@ -156,7 +215,41 @@ def run_turn(
             ),
         )
         wrote_code = False
-        for call in completion.tool_calls:
+        pending = list(completion.tool_calls)
+        cursor = 0
+        while cursor < len(pending):
+            if _parallel_batch(pending, cursor):
+                batch: list[ToolCall] = []
+                while cursor < len(pending) and _can_parallel(pending[cursor]):
+                    batch.append(pending[cursor])
+                    cursor += 1
+                ready: list[ToolCall] = []
+                for call in batch:
+                    if _preflight(call, history, config, gate, store, session, on_event):
+                        ready.append(call)
+                        history.append(_signature(call))
+                if len(ready) > 1:
+                    with ThreadPoolExecutor(max_workers=len(ready)) as pool:
+                        results = list(pool.map(lambda item: _execute(item, config), ready))
+                else:
+                    results = [_execute(item, config) for item in ready]
+                for call, result in zip(ready, results):
+                    if _note_write(call, result, config, written):
+                        wrote_code = True
+                    label = f"tool: {call.name} {_tool_detail(call)}".rstrip()
+                    _record(
+                        store,
+                        session,
+                        call,
+                        result,
+                        on_event,
+                        label,
+                        title=f"Tool {call.name}",
+                        body=tool_card(call.name, call.arguments, result),
+                    )
+                continue
+            call = pending[cursor]
+            cursor += 1
             detail = _tool_detail(call)
             signature = _signature(call)
             if _is_repeated_call(history, signature, config.doom_repeat_limit):
@@ -198,13 +291,8 @@ def run_turn(
                 )
                 continue
             result = _execute(call, config)
-            if call.name in {"write_file", "edit_file"} and (
-                result.startswith(("wrote ", "edited ")) or result.startswith("error:")
-            ):
+            if _note_write(call, result, config, written):
                 wrote_code = True
-                target = config.project_root / str(call.arguments.get("path") or "")
-                if language_of(target) is not None and target not in written:
-                    written.append(target)
             if call.name == "shell":
                 if result.startswith("Opened "):
                     opened.add(_opened_name(result))
@@ -236,6 +324,72 @@ def run_turn(
     return TurnResult(text=text, usage=usage, session_id=session.id)
 
 
+def _can_parallel(call: ToolCall) -> bool:
+    return call.name in _PARALLEL and not call.parse_error
+
+
+def _parallel_batch(calls: list[ToolCall], cursor: int) -> bool:
+    return cursor + 1 < len(calls) and _can_parallel(calls[cursor]) and _can_parallel(calls[cursor + 1])
+
+
+def _preflight(
+    call: ToolCall,
+    history: list[tuple[str, str]],
+    config: HarnessConfig,
+    gate: PermissionGate,
+    store: SessionStore,
+    session: Session,
+    on_event: EventHandler | None,
+) -> bool:
+    detail = _tool_detail(call)
+    signature = _signature(call)
+    if _is_repeated_call(history, signature, config.doom_repeat_limit):
+        if not gate.allow("doom_loop", detail):
+            _record(
+                store,
+                session,
+                call,
+                "error: this repeated tool call was stopped",
+                on_event,
+                f"denied: repeated {call.name} was stopped",
+                title=f"Tool {call.name}",
+                body="Denied. This repeated call was stopped.",
+            )
+            return False
+    if not gate.allow(call.name, detail):
+        _record(
+            store,
+            session,
+            call,
+            f"error: {call.name} was denied",
+            on_event,
+            f"denied: {call.name} was denied",
+            title=f"Tool {call.name}",
+            body="Denied. The harness did not run this tool.",
+        )
+        return False
+    return True
+
+
+def _note_write(call: ToolCall, result: str, config: HarnessConfig, written: list[Path]) -> bool:
+    if call.name not in {"write_file", "edit_file", "apply_patch"}:
+        return False
+    if not (result.startswith(("wrote ", "edited ", "patched ")) or result.startswith("error:")):
+        return False
+    paths: list[str] = []
+    if call.name == "apply_patch":
+        for hunk in call.arguments.get("hunks") or []:
+            if isinstance(hunk, dict) and hunk.get("path"):
+                paths.append(str(hunk["path"]))
+    else:
+        paths.append(str(call.arguments.get("path") or ""))
+    for raw in paths:
+        target = config.project_root / raw
+        if language_of(target) is not None and target not in written:
+            written.append(target)
+    return True
+
+
 def _execute(call: ToolCall, config: HarnessConfig) -> str:
     if call.name == "shell":
         command = str(call.arguments.get("command") or "")
@@ -263,10 +417,12 @@ def _runtime_pending(paths: list[Path], root: Path) -> str:
         if not path.is_file():
             continue
         suffix = path.suffix.lower()
-        if suffix == ".py" and not uses_tkinter(path):
+        if suffix == ".py" and not uses_tkinter(path) and not serves_http(path):
             result = probe_program(path, root)
         elif suffix == ".java":
             result = probe_java(path, root)
+        elif suffix in {".c", ".cpp", ".go", ".rs", ".rb", ".php", ".kt", ".swift"}:
+            result = probe_compiled(path, root)
         else:
             continue
         if result:
@@ -376,9 +532,9 @@ def _run_check(store: SessionStore, session: Session, config: HarnessConfig, on_
     )
 
 
-def _harness_body(built, schemas: list[dict], config: HarnessConfig, task: str) -> str:
+def _harness_body(built, schemas: list[dict], config: HarnessConfig, task: str, agent: str = "build") -> str:
     names = ", ".join(item["function"]["name"] for item in schemas) or "(none)"
-    coaching = coaching_for(task)
+    coaching = coaching_for(task, agent)
     skill_line = coaching.splitlines()[0] if coaching else "Active skills: none"
     lines = [
         skill_line,

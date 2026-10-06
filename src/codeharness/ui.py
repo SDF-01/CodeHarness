@@ -15,6 +15,8 @@ from codeharness.config import HarnessConfig
 from codeharness.loop import LoopEvent
 from codeharness.model import ChatModel, OpenAICompatibleClient
 from codeharness.session import SessionStore, database_path
+from codeharness.snapshot import restore
+from codeharness.todos import open_todos
 
 PAGE = (Path(__file__).resolve().parent / "ui.html").read_text(encoding="utf-8")
 _TOKEN_LINE = re.compile(
@@ -41,6 +43,12 @@ class Board:
         self._pending: dict | None = None
         self._next_id = 1
 
+    def work_root(self) -> Path:
+        current = self.store.work_dir(self.session)
+        if current and Path(current).is_dir():
+            return Path(current)
+        return self.config.project_root
+
     def close(self) -> None:
         self.store.close()
 
@@ -55,6 +63,9 @@ class Board:
                 "root": str(self.config.project_root),
                 "session_id": self.session.id,
                 "agent": self.store.get_agent(self.session),
+                "phase": self.store.get_phase(self.session),
+                "todos": [item.text for item in open_todos(self.work_root())],
+                "queue": self.store.queued(self.session),
                 "context_limit": self.config.context_limit,
                 "response_reserve": self.config.response_reserve,
                 "busy": self.busy,
@@ -73,12 +84,18 @@ class Board:
             return "Type a task first."
         with self._lock:
             if self.busy:
-                return "A turn is already running."
-            self.busy = True
-            self.error = ""
-            self.latest_prompt = 0
-            self.completion_tokens = 0
-            self.tool_calls = 0
+                self.store.enqueue(self.session, cleaned)
+                queued = True
+            else:
+                queued = False
+                self.busy = True
+        if queued:
+            self._add("status", f"Queued: {cleaned}")
+            return None
+        self.error = ""
+        self.latest_prompt = 0
+        self.completion_tokens = 0
+        self.tool_calls = 0
         self._add("user", cleaned)
         threading.Thread(target=self._run, args=(cleaned,), daemon=True).start()
         return None
@@ -116,6 +133,19 @@ class Board:
                 self.ask,
                 self._on_event,
             )
+            while True:
+                nxt = self.store.dequeue(self.session)
+                if not nxt:
+                    break
+                handle_turn(
+                    self.store,
+                    self.session,
+                    nxt,
+                    self.model,
+                    self.config,
+                    self.ask,
+                    self._on_event,
+                )
         except Exception as exc:
             self._add("error", str(exc))
             with self._lock:
@@ -190,6 +220,11 @@ def _handler_for(board: Board) -> type[BaseHTTPRequestHandler]:
             if path == "/api/permission":
                 problem = board.decide(bool(payload.get("allow")))
                 self._send_result(problem)
+                return
+            if path == "/api/undo":
+                message = restore(board.work_root())
+                board._add("status", message)
+                self._send(202, b"{}", "application/json")
                 return
             self._send(404, b"not found", "text/plain; charset=utf-8")
 

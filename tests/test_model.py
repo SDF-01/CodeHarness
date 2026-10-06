@@ -14,12 +14,13 @@ class _Server(ThreadingHTTPServer):
         self.body = body
         self.status = status
         self.last_auth = None
+        self.last_body = b""
 
 
 class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
-        self.rfile.read(length)
+        self.server.last_body = self.rfile.read(length)
         self.server.last_auth = self.headers.get("Authorization")
         payload = self.server.body
         self.send_response(self.server.status)
@@ -73,6 +74,9 @@ def test_client_parses_tool_calls_and_usage(tmp_path) -> None:
     assert completion.tool_calls[0].arguments == {"path": "a.py"}
     assert completion.prompt_tokens == 10
     assert server.last_auth == "Bearer test-key"
+    sent = json.loads(server.last_body)
+    assert sent["max_tokens"] == config.response_reserve
+    assert "keep_alive" not in sent
 
 
 def test_client_reports_http_errors(tmp_path) -> None:

@@ -10,6 +10,7 @@ from typing import Protocol
 
 from codeharness.config import HarnessConfig
 from codeharness.errors import ConfigError, ModelError
+from codeharness.pace import pace_fields
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,7 @@ class OpenAICompatibleClient:
             "model": self._config.model,
             "messages": messages,
             "temperature": 0,
+            **pace_fields(self._config),
         }
         if tools:
             payload["tools"] = tools

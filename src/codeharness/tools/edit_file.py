@@ -6,12 +6,14 @@ from pathlib import Path
 
 from codeharness.config import HarnessConfig
 from codeharness.review import source_problem
-from codeharness.tools.common import require_str, resolve_inside
+from codeharness.tools.common import only_path_error, require_str, resolve_inside
 
 
 def run(arguments: dict, root: Path, config: HarnessConfig) -> str:
-    del config
     path = resolve_inside(root, require_str(arguments, "path"))
+    limited = only_path_error(config, path, root)
+    if limited:
+        return limited
     old = arguments.get("old_string")
     new = arguments.get("new_string")
     if not isinstance(old, str) or old == "":

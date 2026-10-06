@@ -34,6 +34,9 @@ class SessionSummary:
     updated_at: str
 
 
+_KNOWN_AGENTS = {"plan", "build", "route", "page", "api", "review", "explore", "general"}
+
+
 class SessionStore:
     def __init__(self, db_path: Path) -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -77,8 +80,17 @@ class SessionStore:
                 path TEXT NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES sessions(id)
             );
+            CREATE TABLE IF NOT EXISTS message_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                text TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            );
             """
         )
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(session_state)")}
+        if "phase" not in columns:
+            self._conn.execute("ALTER TABLE session_state ADD COLUMN phase TEXT NOT NULL DEFAULT 'ready'")
         self._conn.commit()
 
     def close(self) -> None:
@@ -149,7 +161,7 @@ class SessionStore:
         return str(row["agent"] or "build")
 
     def set_agent(self, session: Session, name: str) -> None:
-        agent = "plan" if name == "plan" else "build"
+        agent = name if name in _KNOWN_AGENTS else "build"
         self._conn.execute(
             """
             INSERT INTO session_state (session_id, agent) VALUES (?, ?)
@@ -197,6 +209,66 @@ class SessionStore:
             (session.id, str(path.resolve())),
         )
         self._conn.commit()
+
+    def set_phase(self, session: Session, phase: str) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO session_state (session_id, agent, phase) VALUES (?, 'build', ?)
+            ON CONFLICT(session_id) DO UPDATE SET phase = excluded.phase
+            """,
+            (session.id, phase),
+        )
+        self._conn.commit()
+
+    def get_phase(self, session: Session) -> str:
+        row = self._conn.execute(
+            "SELECT phase FROM session_state WHERE session_id = ?",
+            (session.id,),
+        ).fetchone()
+        if row is None or row["phase"] is None:
+            return "ready"
+        return str(row["phase"])
+
+    def enqueue(self, session: Session, text: str) -> None:
+        cleaned = text.strip()
+        if not cleaned:
+            return
+        self._conn.execute(
+            "INSERT INTO message_queue (session_id, text) VALUES (?, ?)",
+            (session.id, cleaned),
+        )
+        self._conn.commit()
+
+    def dequeue(self, session: Session) -> str:
+        row = self._conn.execute(
+            "SELECT id, text FROM message_queue WHERE session_id = ? ORDER BY id LIMIT 1",
+            (session.id,),
+        ).fetchone()
+        if row is None:
+            return ""
+        self._conn.execute("DELETE FROM message_queue WHERE id = ?", (row["id"],))
+        self._conn.commit()
+        return str(row["text"])
+
+    def queued(self, session: Session) -> list[str]:
+        rows = self._conn.execute(
+            "SELECT text FROM message_queue WHERE session_id = ? ORDER BY id",
+            (session.id,),
+        ).fetchall()
+        return [str(row["text"]) for row in rows]
+
+    def drop_interrupted(self, session: Session) -> None:
+        if not session.messages:
+            return
+        last = session.messages[-1]
+        if last.role != "assistant" or last.content != "interrupted":
+            return
+        self._conn.execute(
+            "DELETE FROM messages WHERE session_id = ? AND seq = ?",
+            (session.id, len(session.messages)),
+        )
+        self._conn.commit()
+        session.messages.pop()
 
     def set_title(self, session: Session, title: str) -> None:
         session.title = title

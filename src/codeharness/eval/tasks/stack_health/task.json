@@ -1,0 +1,8 @@
+{
+  "name": "stack_health",
+  "prompt": "The folder already explains the app. Keep server.py answering GET /api/health with JSON, and keep index.html calling that route.",
+  "permissions": {
+    "write_file": "allow",
+    "edit_file": "allow"
+  }
+}

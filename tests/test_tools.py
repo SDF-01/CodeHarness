@@ -96,7 +96,7 @@ def test_shell_blocks_other_programs_and_chained_commands(tmp_path) -> None:
     chained = f"\"{sys.executable}\" -c \"print(1)\" | more"
     chained_result = shell.run({"command": chained}, tmp_path, config)
     assert "chain" in chained_result
-    for command in ("java -version", "javac -version", "node -v", "npm -v", "npx -v"):
+    for command in ("java -version", "javac -version", "node -v", "npm -v", "npx -v", "go version", "g++ --version"):
         result = shell.run({"command": command}, tmp_path, config)
         assert "blocked" not in result.lower()
         assert "chain" not in result.lower()

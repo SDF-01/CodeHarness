@@ -7,12 +7,14 @@ from pathlib import Path
 from codeharness.config import HarnessConfig
 from codeharness.languages import language_of
 from codeharness.review import normalize_source, source_problem
-from codeharness.tools.common import require_str, resolve_inside
+from codeharness.tools.common import only_path_error, require_str, resolve_inside
 
 
 def run(arguments: dict, root: Path, config: HarnessConfig) -> str:
-    del config
     path = resolve_inside(root, require_str(arguments, "path"))
+    limited = only_path_error(config, path, root)
+    if limited:
+        return limited
     content = arguments.get("content")
     if not isinstance(content, str):
         return "error: content is required"

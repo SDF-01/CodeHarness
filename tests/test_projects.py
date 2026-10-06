@@ -23,14 +23,21 @@ def test_task_slug_uses_the_program_name() -> None:
 
 
 def test_a_build_lands_in_its_own_folder(tmp_path) -> None:
+    def ask(name, detail):
+        return name != "web_gui"
+
     model = ScriptedModel(
         [
+            Completion(content="- [ ] Create atm.py", tool_calls=[], prompt_tokens=1, completion_tokens=1),
             _write("atm.py", "print('atm')\n"),
             Completion(content="built", tool_calls=[], prompt_tokens=1, completion_tokens=1),
+            Completion(content="No problems.", tool_calls=[], prompt_tokens=1, completion_tokens=1),
             _write("atm.py", "print('atm-fixed')\n"),
             Completion(content="fixed", tool_calls=[], prompt_tokens=1, completion_tokens=1),
+            Completion(content="- [ ] Create clock.py", tool_calls=[], prompt_tokens=1, completion_tokens=1),
             _write("clock.py", "print('clock')\n"),
             Completion(content="clocked", tool_calls=[], prompt_tokens=1, completion_tokens=1),
+            Completion(content="No problems.", tool_calls=[], prompt_tokens=1, completion_tokens=1),
         ]
     )
     store = SessionStore(database_path(tmp_path))
@@ -40,9 +47,9 @@ def test_a_build_lands_in_its_own_folder(tmp_path) -> None:
         model="test",
         permissions={**HarnessConfig().permissions, "write_file": "allow"},
     )
-    handle_turn(store, session, "build an atm", model, config, ask=lambda name, detail: False)
-    handle_turn(store, session, "fix the menu", model, config, ask=lambda name, detail: False)
-    handle_turn(store, session, "build a clock", model, config, ask=lambda name, detail: False)
+    handle_turn(store, session, "build an atm", model, config, ask=ask)
+    handle_turn(store, session, "fix the menu", model, config, ask=ask)
+    handle_turn(store, session, "build a clock", model, config, ask=ask)
     store.close()
     assert (tmp_path / "projects" / "atm" / "atm.py").read_text(encoding="utf-8") == "print('atm-fixed')\n"
     assert (tmp_path / "projects" / "clock" / "clock.py").read_text(encoding="utf-8") == "print('clock')\n"

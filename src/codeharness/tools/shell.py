@@ -25,6 +25,26 @@ _INTERPRETER_NAMES = {
     "npm.cmd",
     "npx",
     "npx.cmd",
+    "gcc",
+    "gcc.exe",
+    "g++",
+    "g++.exe",
+    "dotnet",
+    "dotnet.exe",
+    "go",
+    "go.exe",
+    "gofmt",
+    "gofmt.exe",
+    "rustc",
+    "rustc.exe",
+    "ruby",
+    "ruby.exe",
+    "php",
+    "php.exe",
+    "kotlinc",
+    "kotlinc.bat",
+    "swiftc",
+    "swiftc.exe",
 }
 
 MAX_COMMAND_CHARS = 4000
@@ -90,7 +110,7 @@ def _sandbox_problem(command: str) -> str | None:
         return None
     return (
         "error: that command is blocked. "
-        "Python, Java, Node, npm, and npx can run. Other programs are blocked."
+        "Python, Java, Node, npm, npx, and the matching compilers can run. Other programs are blocked."
     )
 
 

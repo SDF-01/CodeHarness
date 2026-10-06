@@ -15,6 +15,7 @@ SYSTEM_PROMPT = (
     "Work like OpenCode: write code into project files, then prove it runs. "
     f"You can write {LANGUAGE_NAMES}. Follow the language the user chose. "
     "Use write_file to create a file and edit_file to change one that exists. "
+    "Write a new file in one write_file call. Do not explain the code before that call. "
     "Do not paste source code in the final answer. Name the file path and whether the check passed. "
     "Do not repeat a tool call that failed. "
     "Call a tool when you need one. Do not print a JSON tool call as the answer. "
@@ -52,19 +53,20 @@ def build_context(
     config: HarnessConfig,
     lessons: list[str] | None = None,
     agent: str = "build",
+    note: str = "",
 ) -> BuiltContext:
     """Keep the newest tool result and replace older ones with stubs when over budget."""
     tool_indexes = [index for index, message in enumerate(stored) if message.role == "tool"]
     order = tool_indexes[:-1] + tool_indexes[-1:]
     stubbed: set[int] = set()
     pruned = False
-    messages = _assemble(stored, stubbed, config, lessons or [], agent)
+    messages = _assemble(stored, stubbed, config, lessons or [], agent, note, pruned)
     for index in order:
         if estimate_messages(messages) <= config.prompt_budget:
             break
         stubbed.add(index)
         pruned = True
-        messages = _assemble(stored, stubbed, config, lessons or [], agent)
+        messages = _assemble(stored, stubbed, config, lessons or [], agent, note, pruned)
     return BuiltContext(
         messages=messages,
         estimated_tokens=estimate_messages(messages),
@@ -80,12 +82,16 @@ def _system_prompt(
     stored: list[StoredMessage],
     lessons: list[str],
     agent: str,
+    note: str = "",
+    pruned: bool = False,
 ) -> str:
     task = _latest_task(stored)
     lines = [SYSTEM_PROMPT]
     extra = prompt_addons(task, config.project_root, _touched_paths(stored), lessons, agent)
     if extra:
         lines.append(extra)
+    if pruned and note.strip():
+        lines.append("Digest:\n" + note.strip())
     if config.check_command and wants_harness_tests(task):
         lines.append(f"Check command: {config.check_command}")
     if config.launch_command:
@@ -118,8 +124,10 @@ def _assemble(
     config: HarnessConfig,
     lessons: list[str],
     agent: str,
+    note: str = "",
+    pruned: bool = False,
 ) -> list[dict]:
-    messages = [{"role": "system", "content": _system_prompt(config, stored, lessons, agent)}]
+    messages = [{"role": "system", "content": _system_prompt(config, stored, lessons, agent, note, pruned)}]
     for index, message in enumerate(stored):
         content = _stub(message) if index in stubbed else message.content
         messages.append(_to_api(message, content))

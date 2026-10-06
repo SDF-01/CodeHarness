@@ -16,7 +16,7 @@ def test_old_tool_results_are_pruned_before_the_newest(tmp_path) -> None:
     config = HarnessConfig(
         project_root=tmp_path,
         model="test",
-        context_limit=400,
+        context_limit=560,
         response_reserve=40,
         max_tool_output_chars=4000,
     )

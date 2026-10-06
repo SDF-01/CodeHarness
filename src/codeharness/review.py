@@ -58,9 +58,11 @@ def undefined_problem(path: Path) -> str | None:
     for node in ast.walk(tree):
         if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
             bound.add(node.id)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             bound.add(node.name)
             bound.update(_arg_names(node.args))
+        elif isinstance(node, ast.ClassDef):
+            bound.add(node.name)
         elif isinstance(node, ast.Lambda):
             bound.update(_arg_names(node.args))
         elif isinstance(node, ast.Import):
