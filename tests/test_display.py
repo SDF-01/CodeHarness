@@ -7,8 +7,10 @@ from codeharness.display import (
     approval_choice,
     approval_sentence,
     folder_choice,
+    format_elapsed,
     format_status,
     meter_line,
+    step_meter,
     progress_line,
 )
 from codeharness.loop import LoopEvent, run_turn
@@ -142,14 +144,33 @@ def test_folder_choice_picks_a_number_or_the_new_folder(tmp_path) -> None:
     assert folder_choice("1", [existing], "your-mom") == existing
     assert folder_choice("2", [existing], "your-mom") == Path("your-mom")
     assert folder_choice("9", [existing], "your-mom") is None
+    assert folder_choice("1", [existing], "") == existing
+    assert folder_choice("", [existing], "") is None
     assert progress_line("Using that as the request.") == "Using that as the request."
 
 
 def test_a_sentence_is_not_a_yes_or_a_no() -> None:
     assert approval_choice("y") == "yes"
+    assert approval_choice("yup") == "yes"
+    assert approval_choice("yeah") == "yes"
     assert approval_choice("no") == "no"
     assert approval_choice("what needs a yes") == "stop"
     assert approval_choice("you dont even know what youre building") == "stop"
+
+
+def test_the_meter_counts_up_from_zero() -> None:
+    assert format_elapsed(0) == "0s"
+    assert format_elapsed(4.6) == "4s"
+    assert format_elapsed(31) == "31s"
+    assert 0 < step_meter(0, 60, 0) < 60
+    creeping = step_meter(60, 60, 40)
+    assert 60 < creeping < 80
+    buffer = StringIO()
+    view = Console(out=buffer, color=False)
+    view.event(LoopEvent("meter", "60"))
+    text = buffer.getvalue()
+    assert "0s" in text
+    assert "60%" in text
 
 
 def test_a_build_meter_hides_the_source() -> None:

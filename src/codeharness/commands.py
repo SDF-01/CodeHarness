@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -21,6 +22,9 @@ from codeharness.projects import (
     assign_project,
     fresh_task,
     is_tweak,
+    match_project,
+    project_act,
+    project_dirs,
     task_slug,
     wants_new_folder,
 )
@@ -72,15 +76,17 @@ def handle_turn(
             return 0
         if _qualifies(request):
             request = text.rstrip() + "\n\n" + request
-        _emit(
-            on_event,
-            LoopEvent(
-                "status",
-                "Using that as the request.",
-                title="Working",
-                body="Using that as the request.",
-            ),
-        )
+        action, _rest = project_act(request)
+        if action not in {"help", "list", "switch", "delete", "new"}:
+            _emit(
+                on_event,
+                LoopEvent(
+                    "status",
+                    "Using that as the request.",
+                    title="Working",
+                    body="Using that as the request.",
+                ),
+            )
         return handle_turn(
             store,
             session,
@@ -118,6 +124,19 @@ def _handle_turn(
             if lowered == "plan"
             else "Build mode. I can create and edit files."
         )
+        _emit(on_event, LoopEvent("answer", message, title="Result", body=message))
+        return 0
+    action, rest = project_act(text)
+    if action == "help":
+        return _slash(store, session, "/help", config, on_event)
+    if action == "list":
+        return _list_projects(store, session, config, on_event)
+    if action == "switch":
+        return _switch_project(store, session, config, on_event, choose, rest)
+    if action == "delete":
+        return _delete_project(store, session, config, ask, on_event, rest)
+    if action == "new" and not rest.strip():
+        message = "Say what the new project should be. Example: new project build an ATM."
         _emit(on_event, LoopEvent("answer", message, title="Result", body=message))
         return 0
     if is_chat(lowered):
@@ -175,6 +194,7 @@ def _handle_turn(
     note = _with_design(note, config.project_root)
     mode = _construction(chosen, turn_config, open_project=open_project)
     armed = _arm_build(mode, turn_config, ask, product)
+    declined = _declined(turn_config, armed, mode)
     if mode == "build":
         note = _build_note(note, product)
     elif mode == "update":
@@ -199,6 +219,10 @@ def _handle_turn(
     if stages is not None:
         stages.lap("write")
     settle_task(config.project_root, result.text, result.checks)
+    if declined:
+        message = "Stopped. Nothing was changed."
+        _emit(on_event, LoopEvent("answer", message, title="Result", body=message))
+        return 0
     code = _finish_build(
         store,
         session,
@@ -517,6 +541,7 @@ def handoff(
     _emit(on_event, LoopEvent("status", "Building from the plan.", title="Harness", body="Building from the plan."))
     mode = _construction(task, config)
     armed = _arm_build(mode, config, ask, task)
+    declined = _declined(config, armed, mode)
     stages = _Stages()
     built = run_turn(
         store=store,
@@ -530,6 +555,10 @@ def handoff(
     )
     settle_task(config.project_root, built.text, built.checks)
     stages.lap("write")
+    if declined:
+        message = "Stopped. Nothing was changed."
+        _emit(on_event, LoopEvent("answer", message, title="Result", body=message))
+        return 0
     code = _finish_build(store, session, model, armed, ask, on_event, mode, task, stages)
     remember_design(config.project_root, task)
     _show_verdict(
@@ -585,8 +614,16 @@ def _update_note(note: str, request: str) -> str:
     return (note.rstrip() + "\n" + extra).strip()
 
 
+def _declined(before: HarnessConfig, after: HarnessConfig, mode: str) -> bool:
+    """True when the user said no to the build. A no does not launch the open program."""
+    if not mode:
+        return False
+    asked = before.permissions.get("write_file") == "ask" or before.permissions.get("edit_file") == "ask"
+    return asked and after.permissions.get("write_file") == "deny"
+
+
 def _arm_build(mode: str, config: HarnessConfig, ask: AskFunc, request: str = "") -> HarnessConfig:
-    """One yes covers the file writes. No keeps writes off. The harness launches."""
+    """One yes covers the file writes. No stops the turn before anything launches."""
     if not mode:
         return config
     permissions = dict(config.permissions)
@@ -932,6 +969,114 @@ def _plan_is_empty(text: str) -> bool:
     return cleaned.startswith("Stopped after ")
 
 
+def _project_lines(folders: list[Path], current: str) -> str:
+    if not folders:
+        return "No projects yet. Say new project and what to build."
+    rows = []
+    for index, folder in enumerate(folders, start=1):
+        mark = "  open" if str(folder.resolve()) == current else ""
+        rows.append(f"{index}  projects/{folder.name}{mark}")
+    return "Projects:\n" + "\n".join(rows)
+
+
+def _list_projects(store: SessionStore, session: Session, config: HarnessConfig, on_event: EventHandler | None) -> int:
+    folders = project_dirs(_workspace(config))
+    message = _project_lines(folders, store.work_dir(session))
+    message += "\nSay change project folder, or name one: open project calculator."
+    _emit(on_event, LoopEvent("answer", message, title="Result", body=message))
+    return 0
+
+
+def _switch_project(
+    store: SessionStore,
+    session: Session,
+    config: HarnessConfig,
+    on_event: EventHandler | None,
+    choose,
+    name: str,
+) -> int:
+    """Open an existing project. This does not build or update anything."""
+    workspace = _workspace(config)
+    folders = project_dirs(workspace)
+    if name:
+        folder = match_project(folders, name)
+        if folder is None:
+            message = f"No project named {name}.\n{_project_lines(folders, store.work_dir(session))}"
+            _emit(on_event, LoopEvent("answer", message, title="Result", body=message))
+            return 0
+        return _open_existing(store, session, on_event, folder)
+    if not folders:
+        message = "No projects yet. Say new project and what to build."
+        _emit(on_event, LoopEvent("answer", message, title="Result", body=message))
+        return 0
+    if choose is None:
+        message = _project_lines(folders, store.work_dir(session))
+        _emit(on_event, LoopEvent("answer", message, title="Result", body=message))
+        return 0
+    picked = choose(folders, "")
+    if picked is None:
+        message = "No project chosen."
+        _emit(on_event, LoopEvent("answer", message, title="Result", body=message))
+        return 0
+    folder = picked if picked.is_absolute() else workspace / PROJECTS_DIR / picked.name
+    if not folder.is_dir() or folder.resolve().parent != (workspace / PROJECTS_DIR).resolve():
+        message = f"No project named {picked.name}."
+        _emit(on_event, LoopEvent("answer", message, title="Result", body=message))
+        return 0
+    return _open_existing(store, session, on_event, folder)
+
+
+def _open_existing(
+    store: SessionStore,
+    session: Session,
+    on_event: EventHandler | None,
+    folder: Path,
+) -> int:
+    resolved = folder.resolve()
+    store.set_work_dir(session, resolved)
+    store.set_title(session, f"{PROJECTS_DIR}/{resolved.name}")
+    message = f"Project folder: {PROJECTS_DIR}/{resolved.name}"
+    opened = f"Open project: {PROJECTS_DIR}/{resolved.name}"
+    _emit(on_event, LoopEvent("status", message, title="Working", body=message))
+    _emit(on_event, LoopEvent("answer", opened, title="Result", body=opened))
+    return 0
+
+
+def _delete_project(
+    store: SessionStore,
+    session: Session,
+    config: HarnessConfig,
+    ask: AskFunc,
+    on_event: EventHandler | None,
+    name: str,
+) -> int:
+    """Remove one folder under projects/ after a yes. Nothing else is deleted."""
+    workspace = _workspace(config)
+    folders = project_dirs(workspace)
+    if not name or name in {"this", "the", "it", "current", "open"}:
+        current = store.work_dir(session)
+        folder = Path(current) if current else None
+    else:
+        folder = match_project(folders, name)
+    projects = (workspace / PROJECTS_DIR).resolve()
+    if folder is None or not folder.is_dir() or folder.resolve().parent != projects:
+        message = "Say which project to delete. Example: delete project calculator."
+        _emit(on_event, LoopEvent("answer", message, title="Result", body=message))
+        return 0
+    target = folder.resolve()
+    if not ask("delete_project", f"Delete projects/{target.name}? This removes that folder."):
+        message = f"Kept projects/{target.name}."
+        _emit(on_event, LoopEvent("answer", message, title="Result", body=message))
+        return 0
+    shutil.rmtree(target)
+    if store.work_dir(session) == str(target):
+        store.set_work_dir(session, workspace.resolve())
+        store.set_title(session, workspace.name)
+    message = f"Deleted projects/{target.name}."
+    _emit(on_event, LoopEvent("answer", message, title="Result", body=message))
+    return 0
+
+
 def _slash(
     store: SessionStore,
     session: Session,
@@ -962,7 +1107,12 @@ def _slash(
             "/plan  look, and write only PLAN.md\n"
             "/build  create files again\n"
             "/undo  restore the latest snapshot\n"
-            "/sessions  saved sessions"
+            "/sessions  saved sessions\n"
+            "new project build an ATM  start another program\n"
+            "change project folder  open a different project\n"
+            "list projects  show the folders\n"
+            "delete project <name>  remove one project\n"
+            "help  this list"
         )
     elif command == "/tools":
         body = tool_catalog()

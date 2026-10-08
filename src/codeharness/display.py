@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import math
 import re
 import shutil
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import TextIO
 
@@ -161,7 +164,16 @@ class Console:
         self.phase = "ready"
         self._meter_on = False
         self._meter_pct = 0
+        self._meter_target = 0
+        self._meter_ticks = 0
         self._meter_open = False
+        self._meter_paused = False
+        self._meter_started: float | None = None
+        self._meter_width = 0
+        self._turn_started: float | None = None
+        self._lock = threading.Lock()
+        self._tick_stop: threading.Event | None = None
+        self._ticker: threading.Thread | None = None
 
     def banner(self, config: HarnessConfig, session_id: str) -> None:
         width = self._banner_width()
@@ -220,11 +232,19 @@ class Console:
         )
 
     def prompt_block(self, text: str) -> None:
-        self._shown = set()
-        self._streamed = ""
-        self._meter_on = False
-        self._meter_pct = 0
-        self._meter_open = False
+        with self._lock:
+            self._stop_ticks()
+            self._shown = set()
+            self._streamed = ""
+            self._meter_on = False
+            self._meter_pct = 0
+            self._meter_target = 0
+            self._meter_ticks = 0
+            self._meter_open = False
+            self._meter_paused = False
+            self._meter_started = None
+            self._meter_width = 0
+            self._turn_started = time.monotonic()
         self.block("Prompt", text.strip())
 
     def event(self, item: LoopEvent) -> None:
@@ -270,32 +290,32 @@ class Console:
 
     def _take_meter(self, raw: str) -> None:
         self._meter_on = True
+        if self._meter_started is None:
+            self._meter_started = time.monotonic()
+            self._start_ticks()
         if raw.strip() == "failed":
+            self._stop_ticks()
             self._paint_meter(self._meter_pct or 100, done=True, note="failed")
             self._meter_on = False
             return
         try:
-            percent = int(raw.strip())
+            target = int(raw.strip())
         except ValueError:
-            percent = self._meter_pct
-        self._paint_meter(percent, done=percent >= 100)
+            target = self._meter_target
+        target = max(0, min(100, target))
+        if target != self._meter_target:
+            self._meter_ticks = 0
+        self._meter_target = target
+        if self.out.isatty() and target < 100:
+            shown = step_meter(self._meter_pct, target, self._meter_ticks)
+            self._paint_meter(shown, done=False)
+            return
+        self._stop_ticks()
+        self._paint_meter(target, done=target >= 100)
 
     def _quiet(self, item: LoopEvent) -> None:
-        """A build stays off the screen. The bar is the only motion."""
-        body = (item.body or item.text or "").lower()
-        if item.kind == "status" and "compil" in body:
-            self._paint_meter(max(self._meter_pct, 90), done=False)
-            return
-        if item.kind == "delta":
-            self._nudge(1, 84)
-            return
-        if item.kind == "tool":
-            self._nudge(6, 88)
-            return
-        if item.kind == "answer":
-            self._nudge(4, 92)
-            return
-        self._nudge(1, 70)
+        """A build stays off the screen. Stages set the percent. Nudges do not."""
+        return
 
     def _nudge(self, amount: int, cap: int) -> None:
         if self._meter_pct >= cap:
@@ -303,24 +323,76 @@ class Console:
         self._paint_meter(min(self._meter_pct + amount, cap), done=False)
 
     def _paint_meter(self, percent: int, done: bool, note: str = "") -> None:
+        with self._lock:
+            self._paint_locked(percent, done, note)
+
+    def _paint_locked(self, percent: int, done: bool, note: str = "") -> None:
         percent = max(0, min(100, percent))
         if percent < self._meter_pct and not done:
             percent = self._meter_pct
         self._meter_pct = percent
         fancy = self._can_encode("█░")
         line = meter_line(percent, fancy=fancy)
+        elapsed = self._elapsed()
+        if elapsed:
+            line = f"{line}  {elapsed}"
         if note:
             line = f"{line}  {note}"
         painted = self._hex(line, _GOLD)
-        if self._meter_open:
-            print("\r" + painted, file=self.out, end="", flush=True)
-        else:
-            print(painted, file=self.out, end="", flush=True)
-            self._meter_open = True
+        width = max(self._meter_width, _visible_len(painted))
+        self._meter_width = width
+        padded = painted + (" " * (width - _visible_len(painted)))
+        erase = "\033[K" if self.color else ""
+        prefix = "\r" if self._meter_open else ""
+        print(prefix + padded + erase, file=self.out, end="", flush=True)
+        self._meter_open = True
         if done:
             print(file=self.out)
             self._meter_open = False
             self._meter_on = False
+            self._meter_paused = False
+
+    def _start_ticks(self) -> None:
+        if not self.out.isatty():
+            return
+        if self._ticker is not None and self._ticker.is_alive():
+            return
+        self._tick_stop = threading.Event()
+        stop = self._tick_stop
+        self._ticker = threading.Thread(target=self._tick_loop, args=(stop,), name="codeharness-meter", daemon=True)
+        self._ticker.start()
+
+    def _stop_ticks(self) -> None:
+        if self._tick_stop is not None:
+            self._tick_stop.set()
+        self._tick_stop = None
+
+    def _tick_loop(self, stop: threading.Event) -> None:
+        while not stop.wait(0.5):
+            with self._lock:
+                if stop.is_set() or not self._meter_open or self._meter_paused:
+                    continue
+                self._meter_ticks += 1
+                shown = step_meter(self._meter_pct, self._meter_target, self._meter_ticks)
+                self._paint_locked(shown, done=False)
+
+    def _pause_meter(self) -> None:
+        with self._lock:
+            self._meter_paused = True
+            if self._meter_open:
+                print(file=self.out)
+                self._meter_open = False
+
+    def _resume_meter(self) -> None:
+        with self._lock:
+            self._meter_paused = False
+            if self._meter_on:
+                self._paint_locked(self._meter_pct, done=False)
+
+    def _elapsed(self) -> str:
+        if self._meter_started is None:
+            return "0s"
+        return format_elapsed(time.monotonic() - self._meter_started)
 
     def _status_once(self, title: str, body: str) -> None:
         key = (title, body)
@@ -382,6 +454,7 @@ class Console:
         self._write("-" * width)
 
     def ask(self, tool_name: str, detail: str) -> bool:
+        self._pause_meter()
         sentence = approval_sentence(tool_name, detail)
         width = min(self._width(), 72)
         line = "+" + ("-" * (width - 2)) + "+"
@@ -394,8 +467,10 @@ class Console:
             answer = input(self._glyph())
         except EOFError:
             self._write("")
+            self._resume_meter()
             return False
         choice = approval_choice(answer)
+        self._resume_meter()
         if choice == "yes":
             return True
         if choice == "stop":
@@ -407,9 +482,25 @@ class Console:
 
     def choose_folder(self, folders: list[Path], suggested: str) -> Path | None:
         """Ask which project folder to use. Enter accepts the new folder."""
+        self._pause_meter()
         width = min(max(self._width(), 48), 72)
         line = "+" + ("-" * (width - 2)) + "+"
         self._write(self._hex(line, _BRONZE))
+        if not suggested:
+            self._write(self._hex("| Which project?", _AMBER))
+            for index, folder in enumerate(folders, start=1):
+                self._write(self._hex(f"| {index}  projects/{folder.name}", _TEXT))
+            self._write(self._hex("| Type a number.", _TEXT))
+            self._write(self._hex(line, _BRONZE))
+            try:
+                answer = input(self._glyph())
+            except EOFError:
+                self._write("")
+                self._resume_meter()
+                return None
+            choice = folder_choice(answer, folders, "")
+            self._resume_meter()
+            return choice
         self._write(self._hex("| Which folder?", _AMBER))
         for index, folder in enumerate(folders, start=1):
             self._write(self._hex(f"| {index}  projects/{folder.name}", _TEXT))
@@ -421,10 +512,14 @@ class Console:
             answer = input(self._glyph())
         except EOFError:
             self._write("")
+            self._resume_meter()
             return None
-        return folder_choice(answer, folders, suggested)
+        choice = folder_choice(answer, folders, suggested)
+        self._resume_meter()
+        return choice
 
     def ask_text(self, prompt: str) -> str:
+        self._pause_meter()
         width = min(max(self._width(), 48), 72)
         line = "+" + ("-" * (width - 2)) + "+"
         self._write(self._hex(line, _BRONZE))
@@ -433,10 +528,13 @@ class Console:
             self._write(self._hex("| " + row, _TEXT))
         self._write(self._hex(line, _BRONZE))
         try:
-            return input(self._glyph()).strip()
+            answer = input(self._glyph()).strip()
         except EOFError:
             self._write("")
+            self._resume_meter()
             return ""
+        self._resume_meter()
+        return answer
 
     def _glyph(self) -> str:
         glyph = "❯ "
@@ -518,6 +616,40 @@ class Console:
         }
         code = codes.get(tone, "0")
         return f"\033[{code}m{text}\033[0m"
+
+
+def format_elapsed(seconds: float) -> str:
+    """Whole seconds from zero. The clock counts 0s, 1s, 2s while work is running."""
+    return f"{max(0, int(seconds))}s"
+
+
+def meter_ceiling(target: int) -> int:
+    """The bar may creep toward the next stage, and it stops one step before that stage."""
+    target = max(0, min(100, target))
+    for stage in (10, 30, 60, 80, 95, 100):
+        if stage > target:
+            return stage - 1
+    return 100
+
+
+def step_meter(shown: int, target: int, ticks: int) -> int:
+    """Walk up to the stage, then keep creeping while that stage is still running."""
+    target = max(0, min(100, target))
+    shown = max(0, min(100, shown))
+    if shown < target:
+        return min(target, shown + max(1, (target - shown) // 4))
+    if target >= 100:
+        return 100
+    ceiling = meter_ceiling(target)
+    room = ceiling - target
+    if room <= 0:
+        return target
+    creep = room - int(room * math.exp(-max(ticks, 0) / 20))
+    return min(ceiling, target + creep)
+
+
+def _visible_len(text: str) -> int:
+    return len(re.sub(r"\033\[[0-9;]*m", "", text))
 
 
 def meter_line(percent: int, width: int = 28, fancy: bool = True) -> str:
@@ -630,8 +762,17 @@ def _fit(text: str, width: int) -> str:
 
 
 def folder_choice(answer: str, folders: list[Path], suggested: str) -> Path | None:
-    """Turn a folder-box answer into a path. Enter selects the new folder."""
+    """Turn a folder-box answer into a path. Enter selects the new folder.
+
+    An empty suggestion is a switch: a number opens that project, and Enter cancels.
+    """
     cleaned = answer.strip()
+    if not suggested:
+        if cleaned.isdigit():
+            number = int(cleaned)
+            if 1 <= number <= len(folders):
+                return folders[number - 1]
+        return None
     new_index = len(folders) + 1
     if not cleaned or cleaned == str(new_index):
         return Path(suggested)
@@ -646,7 +787,7 @@ def folder_choice(answer: str, folders: list[Path], suggested: str) -> Path | No
 def approval_choice(answer: str) -> str:
     """Yes allows the step. No skips it. Any other sentence stops the turn."""
     lowered = " ".join(answer.strip().lower().split())
-    if lowered in {"y", "yes"}:
+    if lowered in {"y", "yes", "yup", "yeah", "yep"}:
         return "yes"
     if lowered in {"n", "no", ""}:
         return "no"
@@ -678,6 +819,8 @@ def approval_sentence(tool_name: str, detail: str) -> str:
         return "Build this as a realistic web app with HTML, CSS, React, Tailwind, and shadcn?"
     if tool_name == "doom_loop":
         return "Try that again?"
+    if tool_name == "delete_project":
+        return detail
     if tool_name == "build_go":
         if "I will check that" in detail:
             return detail

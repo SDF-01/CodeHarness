@@ -1,7 +1,7 @@
 from codeharness.commands import handle_turn
 from codeharness.config import HarnessConfig
 from codeharness.model import Completion, ToolCall
-from codeharness.projects import task_slug
+from codeharness.projects import fresh_task, project_act, starts_fresh, task_slug
 from codeharness.run import compile_and_launch
 from codeharness.session import SessionStore, database_path
 from tests.fakes import ScriptedModel
@@ -31,11 +31,26 @@ def _edit(path: str, old: str, new: str) -> Completion:
     )
 
 
+def test_a_new_project_sentence_is_not_an_update() -> None:
+    sentence = "okay new project. build an ATM"
+    assert project_act(sentence) == ("new", "build an atm")
+    assert starts_fresh(sentence)
+    assert fresh_task(sentence) == "build an atm"
+    assert task_slug(sentence) == "atm"
+    assert project_act("change project folder") == ("switch", "")
+    assert project_act("help") == ("help", "")
+    assert project_act("list projects") == ("list", "")
+    assert project_act("delete project calculator") == ("delete", "calculator")
+    assert project_act("open project atm") == ("switch", "atm")
+    assert project_act("make a history panel") == ("", "")
+
+
 def test_task_slug_uses_the_program_name() -> None:
     assert task_slug("build an atm") == "atm"
     assert task_slug("handoff build a digital clock") == "digital-clock"
     assert task_slug("make it red") == "it-red"
     assert task_slug("lets build a scientific calculator") == "scientific-calculator"
+    assert task_slug("new project build a clock") == "clock"
     noted = "build an atm\n\nBuild a full stack app. Write index.html and server.py."
     assert task_slug(noted) == "atm"
 
@@ -57,11 +72,12 @@ def test_a_build_lands_in_its_own_folder(tmp_path) -> None:
     config = HarnessConfig(
         project_root=tmp_path,
         model="test",
+        open_windows=False,
         permissions={**HarnessConfig().permissions, "write_file": "allow", "edit_file": "allow"},
     )
     handle_turn(store, session, "build an atm", model, config, ask=lambda name, detail: False)
     handle_turn(store, session, "fix the menu", model, config, ask=lambda name, detail: False)
-    handle_turn(store, session, "build a clock", model, config, ask=lambda name, detail: False)
+    handle_turn(store, session, "new project build a clock", model, config, ask=lambda name, detail: False)
     handle_turn(store, session, "make the button red", model, config, ask=lambda name, detail: False)
     store.close()
     assert (tmp_path / "projects" / "atm" / "atm.py").read_text(encoding="utf-8") == "print('atm-fixed')\n"
@@ -87,6 +103,7 @@ def test_undo_puts_the_file_back(tmp_path) -> None:
     config = HarnessConfig(
         project_root=tmp_path,
         model="test",
+        open_windows=False,
         permissions={**HarnessConfig().permissions, "write_file": "allow", "edit_file": "allow"},
     )
     handle_turn(store, session, "build an atm", model, config, ask=lambda name, detail: False)

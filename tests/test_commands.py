@@ -974,6 +974,151 @@ def test_a_new_project_asks_for_the_kind_and_the_folder(tmp_path) -> None:
     assert session.title == "projects/clock"
 
 
+def test_okay_new_project_builds_the_atm_not_the_calculator(tmp_path) -> None:
+    folder = tmp_path / "projects" / "calculator"
+    folder.mkdir(parents=True)
+    begin_task(folder, "build a calculator")
+    store = SessionStore(database_path(tmp_path))
+    session = store.create(tmp_path)
+    store.set_work_dir(session, folder.resolve())
+    asked: list[str] = []
+    picked: list[str] = []
+
+    def choose(folders, suggested: str):
+        picked.append(suggested)
+        return tmp_path / "projects" / suggested
+
+    handle_turn(
+        store,
+        session,
+        "okay new project. build an ATM",
+        ScriptedModel([Completion(content="started", tool_calls=[], prompt_tokens=1, completion_tokens=1)]),
+        HarnessConfig(project_root=tmp_path, model="test", open_windows=False),
+        ask=lambda name, detail: asked.append(detail) or True,
+        reply=lambda question: "desktop app",
+        choose=choose,
+    )
+    store.close()
+    assert picked == ["atm"]
+    assert session.title == "projects/atm"
+    assert any("projects/atm" in item for item in asked)
+    assert not any("calculator" in item for item in asked)
+
+
+def test_change_project_folder_opens_the_other_project(tmp_path) -> None:
+    calculator = tmp_path / "projects" / "calculator"
+    atm = tmp_path / "projects" / "atm"
+    calculator.mkdir(parents=True)
+    atm.mkdir(parents=True)
+    begin_task(calculator, "build a calculator")
+    store = SessionStore(database_path(tmp_path))
+    session = store.create(tmp_path)
+    store.set_work_dir(session, calculator.resolve())
+    asked: list[str] = []
+    events: list[str] = []
+
+    def choose(folders, suggested: str):
+        assert suggested == ""
+        assert atm in folders
+        return atm
+
+    handle_turn(
+        store,
+        session,
+        "change project folder",
+        ScriptedModel([]),
+        HarnessConfig(project_root=tmp_path, model="test", open_windows=True),
+        ask=lambda name, detail: asked.append(detail) or False,
+        on_event=lambda event: events.append(event.body or event.text),
+        choose=choose,
+    )
+    store.close()
+    assert asked == []
+    assert session.title == "projects/atm"
+    assert any("Open project: projects/atm" in item for item in events)
+    assert not any("calculator?" in item for item in events)
+
+
+def test_help_does_not_update_the_open_project(tmp_path) -> None:
+    folder = tmp_path / "projects" / "calculator"
+    folder.mkdir(parents=True)
+    begin_task(folder, "build a calculator")
+    store = SessionStore(database_path(tmp_path))
+    session = store.create(tmp_path)
+    store.set_work_dir(session, folder.resolve())
+    asked: list[str] = []
+    events: list[str] = []
+    handle_turn(
+        store,
+        session,
+        "help",
+        ScriptedModel([]),
+        HarnessConfig(project_root=tmp_path, model="test", open_windows=True),
+        ask=lambda name, detail: asked.append(detail) or False,
+        on_event=lambda event: events.append(event.body or event.text),
+    )
+    store.close()
+    assert asked == []
+    text = "\n".join(events)
+    assert "change project folder" in text
+    assert "delete project" in text
+    assert "calculator?" not in text
+
+
+def test_no_does_not_launch_the_open_project(tmp_path, monkeypatch) -> None:
+    launched: list[str] = []
+    monkeypatch.setattr(
+        "codeharness.commands.compile_and_launch",
+        lambda config: launched.append("launched") or (0, "Launch passed."),
+    )
+    folder = tmp_path / "projects" / "calculator"
+    folder.mkdir(parents=True)
+    (folder / "app.py").write_text("print('calc')\n", encoding="utf-8")
+    begin_task(folder, "build a calculator")
+    store = SessionStore(database_path(tmp_path))
+    session = store.create(tmp_path)
+    store.set_work_dir(session, folder.resolve())
+    events: list[str] = []
+    handle_turn(
+        store,
+        session,
+        "add a backspace button",
+        ScriptedModel([]),
+        HarnessConfig(project_root=tmp_path, model="test", open_windows=True),
+        ask=lambda name, detail: False,
+        on_event=lambda event: events.append(event.body or event.text),
+    )
+    store.close()
+    assert launched == []
+    assert any("Stopped. Nothing was changed." in item for item in events)
+
+
+def test_delete_project_removes_only_that_folder(tmp_path) -> None:
+    calculator = tmp_path / "projects" / "calculator"
+    atm = tmp_path / "projects" / "atm"
+    calculator.mkdir(parents=True)
+    atm.mkdir(parents=True)
+    (calculator / "app.py").write_text("print('calc')\n", encoding="utf-8")
+    (atm / "app.py").write_text("print('atm')\n", encoding="utf-8")
+    begin_task(calculator, "build a calculator")
+    store = SessionStore(database_path(tmp_path))
+    session = store.create(tmp_path)
+    store.set_work_dir(session, calculator.resolve())
+    asked: list[str] = []
+    handle_turn(
+        store,
+        session,
+        "delete project calculator",
+        ScriptedModel([]),
+        HarnessConfig(project_root=tmp_path, model="test"),
+        ask=lambda name, detail: asked.append(detail) or True,
+    )
+    store.close()
+    assert any("Delete projects/calculator" in item for item in asked)
+    assert not calculator.exists()
+    assert (atm / "app.py").is_file()
+
+
 def test_verify_stays_in_the_open_project(tmp_path) -> None:
     folder = tmp_path / "projects" / "calculator"
     folder.mkdir(parents=True)
