@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -14,17 +15,37 @@ from codeharness.loop import EventHandler, LoopEvent, run_turn
 from codeharness.repomap import repo_map
 from codeharness.model import ChatModel
 from codeharness.permissions import AskFunc
-from codeharness.playbook import is_chat
-from codeharness.projects import PROJECTS_DIR, assign_project, is_tweak, task_slug, wants_new_folder
+from codeharness.playbook import design_body, is_chat
+from codeharness.projects import (
+    PROJECTS_DIR,
+    assign_project,
+    fresh_task,
+    is_tweak,
+    task_slug,
+    wants_new_folder,
+)
 from codeharness.review import brief_report
 from codeharness.run import compile_and_launch, is_run_command
 from codeharness.session import Session, SessionStore
 from codeharness.snapshot import capture, restore
 from codeharness.stack import expects_stack
-from codeharness.taskrecord import begin_task, behavior_note, check_clause, settle_task
+from codeharness.taskrecord import (
+    begin_task,
+    behavior_note,
+    check_clause,
+    close_faults,
+    close_known_faults,
+    fault_brief,
+    file_versions,
+    load_task,
+    probe_logic,
+    save_faults,
+    settle_task,
+    troubleshoot,
+)
 from codeharness.todos import open_todos
 from codeharness.tools import TOOLS
-from codeharness.web_prompt import apply_kind, kind_question, task_kind
+from codeharness.web_prompt import apply_kind, design_memory, kind_question, product_note, remember_design, task_kind
 
 _EMPTY_PLAN = "The model returned an empty reply."
 
@@ -118,43 +139,65 @@ def _handle_turn(
         return _continue_work(store, session, text, model, config, ask, on_event, choose)
     if is_run_command(text):
         return _launch_requested(store, session, model, config, ask, on_event, choose)
+    if _wants_verify(lowered):
+        return _verify_open(store, session, config, on_event, choose)
     task = handoff_task(text)
     if task is not None and not task:
         return handoff(store, session, task, model, config, ask, on_event, reply)
     source = task if task is not None else text
-    chosen = _with_web_choice(source, on_event, reply)
-    placed = _assign(store, session, chosen, config, choose, on_event)
+    already = bool(store.work_dir(session))
+    fresh = wants_new_folder(source, has_project=already)
+    chosen = _with_web_choice(source, on_event, reply, has_project=already)
+    if fresh:
+        chosen = fresh_task(chosen)
+    placed = _assign(store, session, source if fresh else chosen, config, choose, on_event)
     if placed is None:
         return 0
     config, notice = placed
     if task is not None:
         return handoff(store, session, chosen, model, config, ask, on_event, reply)
     if expects_stack(chosen):
-        _meter(on_event, "8")
+        _meter(on_event, "10")
+        _meter(on_event, "30")
         begin_task(config.project_root, chosen)
-        code = lead_stack(store, session, chosen, model, config, ask, on_event)
+        lead_stack(store, session, chosen, model, config, ask, on_event)
         _settle(config.project_root, session)
-        _meter(on_event, "100" if code == 0 else "failed")
-        return code
+        remember_design(config.project_root, chosen)
+        _show_verdict(config.project_root, on_event, opened=False)
+        return 0
+    open_project = already and not fresh
+    product = _saved_request(config.project_root) if open_project else chosen
+    if not product:
+        product = chosen
     note, turn_config = _follow_up(text, notice, config)
-    note = _with_behavior(note, chosen)
-    mode = _construction(chosen, turn_config)
-    armed = _arm_build(mode, turn_config, ask, chosen)
+    note = _with_project(note, config.project_root)
+    note = _with_behavior(note, product)
+    note = _with_design(note, config.project_root)
+    mode = _construction(chosen, turn_config, open_project=open_project)
+    armed = _arm_build(mode, turn_config, ask, product)
+    if mode == "build":
+        note = _build_note(note, product)
+    elif mode == "update":
+        note = _update_note(note, product)
     if mode:
-        note = _build_note(note)
-        _meter(on_event, "8")
+        _meter(on_event, "10")
+        _meter(on_event, "30")
+        _meter(on_event, "60")
     begin_task(config.project_root, chosen)
+    stages = _Stages() if mode else None
     result = run_turn(
         store=store,
         session=session,
         user_text=chosen,
         model=model,
-        config=replace(armed, open_windows=False) if mode else armed,
+        config=_build_turn(armed) if mode else armed,
         ask=ask,
         on_event=on_event,
         note=note,
         focus=bool(mode),
     )
+    if stages is not None:
+        stages.lap("write")
     settle_task(config.project_root, result.text, result.checks)
     code = _finish_build(
         store,
@@ -164,9 +207,17 @@ def _handle_turn(
         ask,
         on_event,
         mode,
+        product,
+        stages,
     )
     if mode:
-        _meter(on_event, "100" if code == 0 else "failed")
+        remember_design(config.project_root, product)
+        _show_verdict(
+            config.project_root,
+            on_event,
+            opened=code == 0 and turn_config.open_windows,
+            timing="" if stages is None else stages.text(),
+        )
     return code
 
 
@@ -181,8 +232,15 @@ def _assign(store, session, text, config, choose, on_event):
     return config, notice
 
 
+_BUILD_STEPS = 24
 _BUILD_NOTE = (
     "Write this program only. Ignore every older program in the chat. "
+    "Write logic.py first, with the behavior from the request. "
+    "Then write app.py that imports logic and builds the ttk shell. "
+    "Do not answer until both files exist. "
+    "The window is the product. Do not ask for a command. Do not show Unknown command. "
+    "Use a dark background, a display, and at least four buttons. "
+    "Every button calls logic.py and updates the display. "
     "Use write_file. Do not paste source and do not print a JSON tool call."
 )
 _CONTINUE = {"do it", "do that", "go ahead", "finish it", "finish", "make it", "write it", "build it"}
@@ -216,8 +274,37 @@ def _continues(text: str) -> bool:
     return _corrects(text)
 
 
-def _build_note(note: str) -> str:
-    return (note.rstrip() + "\n" + _BUILD_NOTE).strip()
+def _build_note(note: str, request: str = "") -> str:
+    text = (note.rstrip() + "\n" + _BUILD_NOTE).strip()
+    extra = product_note(request)
+    if extra:
+        text = text + "\n" + extra
+    return text
+
+
+class _Stages:
+    """How long each part of a build took."""
+
+    def __init__(self) -> None:
+        self.started = time.monotonic()
+        self.mark = self.started
+        self.rows: list[tuple[str, float]] = []
+
+    def lap(self, name: str) -> None:
+        now = time.monotonic()
+        self.rows.append((name, now - self.mark))
+        self.mark = now
+
+    def text(self) -> str:
+        parts = [f"{name} {_fmt_seconds(seconds)}" for name, seconds in self.rows]
+        parts.append(f"total {_fmt_seconds(time.monotonic() - self.started)}")
+        return " ".join(parts)
+
+
+def _fmt_seconds(seconds: float) -> str:
+    if seconds < 10:
+        return f"{seconds:.1f}s"
+    return f"{int(round(seconds))}s"
 
 
 def _last_request(session: Session) -> str:
@@ -282,20 +369,23 @@ def _continue_work(
         return ask(name, detail)
 
     armed = _arm_build(mode, config, approved, task)
-    _meter(on_event, "8")
+    _meter(on_event, "10")
+    _meter(on_event, "60")
     begin_task(config.project_root, task)
+    stages = _Stages()
     result = run_turn(
         store=store,
         session=session,
         user_text=task,
         model=model,
-        config=replace(armed, open_windows=False),
+        config=_build_turn(armed),
         ask=approved,
         on_event=on_event,
-        note=_build_note(behavior_note(task)),
+        note=_with_design(_build_note(behavior_note(task), task), config.project_root),
         focus=True,
     )
     settle_task(config.project_root, result.text, result.checks)
+    stages.lap("write")
     code = _finish_build(
         store,
         session,
@@ -304,8 +394,16 @@ def _continue_work(
         approved,
         on_event,
         mode,
+        task,
+        stages,
     )
-    _meter(on_event, "100" if code == 0 else "failed")
+    remember_design(config.project_root, task)
+    _show_verdict(
+        config.project_root,
+        on_event,
+        opened=code == 0 and config.open_windows,
+        timing=stages.text(),
+    )
     return code
 
 
@@ -318,7 +416,21 @@ def _launch_requested(
     on_event: EventHandler | None,
     choose,
 ) -> int:
-    """Launch the program from the latest build, not whichever folder was open before."""
+    """Launch the open project. A chat slug is only a fallback when no folder is open."""
+    current = store.work_dir(session)
+    if current and Path(current).is_dir():
+        resolved = Path(current).resolve()
+        config = replace(config, project_root=resolved)
+        _emit(
+            on_event,
+            LoopEvent(
+                "status",
+                f"Project folder: {PROJECTS_DIR}/{resolved.name}",
+                title="Working",
+                body=f"Project folder: {PROJECTS_DIR}/{resolved.name}",
+            ),
+        )
+        return launch_with_repair(store, session, model, config, ask, on_event)
     prior = _last_request(session)
     if prior:
         folder = _workspace(config) / PROJECTS_DIR / task_slug(prior)
@@ -371,13 +483,15 @@ def handoff(
         message = "Type handoff and the task. Example: handoff build a clock."
         _emit(on_event, LoopEvent("answer", message, title="Result", body=message))
         return 0
-    _meter(on_event, "8")
+    _meter(on_event, "10")
+    _meter(on_event, "30")
     begin_task(config.project_root, task)
     if expects_stack(task):
-        code = lead_stack(store, session, task, model, config, ask, on_event)
+        lead_stack(store, session, task, model, config, ask, on_event)
         _settle(config.project_root, session)
-        _meter(on_event, "100" if code == 0 else "failed")
-        return code
+        remember_design(config.project_root, task)
+        _show_verdict(config.project_root, on_event, opened=False)
+        return 0
     store.set_agent(session, "plan")
     _emit(on_event, LoopEvent("status", "Planning. Files stay unchanged.", title="Harness", body="Planning. Files stay unchanged."))
     plan = run_turn(
@@ -388,7 +502,10 @@ def handoff(
         config=config,
         ask=ask,
         on_event=on_event,
-        note=behavior_note(task),
+        note=_with_design(
+            "\n".join(part for part in (behavior_note(task), product_note(task)) if part),
+            config.project_root,
+        ),
     )
     if _plan_is_empty(plan.text):
         message = "The plan was empty. Build did not start."
@@ -400,19 +517,27 @@ def handoff(
     _emit(on_event, LoopEvent("status", "Building from the plan.", title="Harness", body="Building from the plan."))
     mode = _construction(task, config)
     armed = _arm_build(mode, config, ask, task)
+    stages = _Stages()
     built = run_turn(
         store=store,
         session=session,
         user_text=f"Implement this plan:\n{plan.text}",
         model=model,
-        config=armed,
+        config=_build_turn(armed) if mode else armed,
         ask=ask,
         on_event=on_event,
-        note=behavior_note(task),
+        note=_with_design(_build_note(behavior_note(task), task), config.project_root),
     )
     settle_task(config.project_root, built.text, built.checks)
-    code = _finish_build(store, session, model, armed, ask, on_event, mode)
-    _meter(on_event, "100" if code == 0 else "failed")
+    stages.lap("write")
+    code = _finish_build(store, session, model, armed, ask, on_event, mode, task, stages)
+    remember_design(config.project_root, task)
+    _show_verdict(
+        config.project_root,
+        on_event,
+        opened=code == 0 and config.open_windows,
+        timing=stages.text(),
+    )
     return code
 
 
@@ -424,37 +549,40 @@ def launch_with_repair(
     ask: AskFunc,
     on_event: EventHandler | None,
 ) -> int:
-    code, report = compile_and_launch(config)
-    _emit(on_event, LoopEvent("run", brief_report(report), title="Run", body=brief_report(report)))
-    if code == 0:
-        return 0
-    note = "That build is not viable. Reviewing the files and updating them."
-    _emit(on_event, LoopEvent("answer", note, title="Result", body=note))
-    run_turn(
-        store=store,
-        session=session,
-        user_text=(
-            "The Python does not compile. Fix the files in the project. "
-            "Do not paste source in the answer.\n"
-            + brief_report(report)
-        ),
-        model=model,
-        config=config,
-        ask=ask,
-        on_event=on_event,
-    )
-    code, report = compile_and_launch(config)
-    _emit(on_event, LoopEvent("run", brief_report(report), title="Run", body=brief_report(report)))
+    """Launch the open program. A failure is a fault to fix, not the end of the run."""
+    stages = _Stages()
+    record = load_task(config.project_root)
+    request = str(record.get("request") or "") if record else ""
+    code = _until_it_runs(store, session, model, config, ask, on_event, request, stages)
+    _show_verdict(config.project_root, on_event, opened=code == 0, timing=stages.text())
     return code
 
 
-def _construction(text: str, config: HarnessConfig) -> str:
-    """A new program is a build. A change inside projects/ is an update."""
+def _construction(text: str, config: HarnessConfig, *, open_project: bool = False) -> str:
+    """A new program is a build. A change inside an open project is an update."""
+    if open_project:
+        return "update"
     if wants_new_folder(text):
         return "build"
     if is_tweak(text) and config.project_root.parent.name == PROJECTS_DIR:
         return "update"
     return ""
+
+
+def _saved_request(root: Path) -> str:
+    """The product the open folder was built for. Later sentences do not replace it."""
+    record = load_task(root)
+    if not record:
+        return ""
+    return str(record.get("request") or "")
+
+
+def _update_note(note: str, request: str) -> str:
+    """Keep the original product card. The new sentence is only the change."""
+    extra = product_note(request)
+    if not extra:
+        return note
+    return (note.rstrip() + "\n" + extra).strip()
 
 
 def _arm_build(mode: str, config: HarnessConfig, ask: AskFunc, request: str = "") -> HarnessConfig:
@@ -505,6 +633,45 @@ def _build_yes(mode: str, request: str, folder: str) -> str:
     return f"{head} {check_clause(request)}"
 
 
+def _with_design(note: str, root: Path) -> str:
+    """Design rules and the last design memory. Callers must not print this."""
+    parts = [note.strip(), design_body()]
+    memory = design_memory(root)
+    if memory:
+        parts.append("Earlier design:\n" + memory)
+    return "\n".join(part for part in parts if part)
+
+
+def _show_verdict(root: Path, on_event: EventHandler | None, opened: bool, timing: str = "") -> None:
+    """One line from task.json. The model sentence is not this line."""
+    state = _task_state(root)
+    if state == "failed":
+        cause = _open_cause(root)
+        line = f"failed: logic. {cause}" if cause else "failed: the build failed."
+        _meter(on_event, "failed")
+    elif opened:
+        line = f"{state}: the window is open."
+        _meter(on_event, "100")
+    else:
+        line = f"{state}: the build finished."
+        _meter(on_event, "100" if state != "failed" else "failed")
+    if timing:
+        line = f"{line}\n{timing}"
+    _emit(on_event, LoopEvent("answer", line, title="Result", body=line))
+
+
+def _task_state(root: Path) -> str:
+    record = load_task(root)
+    if record is None:
+        return "unverified"
+    states = [str(item.get("state") or "") for item in record.get("requirements", [])]
+    if any(item == "failed" for item in states):
+        return "failed"
+    if states and all(item == "verified" for item in states):
+        return "verified"
+    return states[-1] if states else "unverified"
+
+
 def _with_behavior(note: str, request: str) -> str:
     extra = behavior_note(request)
     if not extra:
@@ -512,6 +679,11 @@ def _with_behavior(note: str, request: str) -> str:
     if not note:
         return extra
     return note.rstrip() + "\n" + extra
+
+
+def _build_turn(config: HarnessConfig) -> HarnessConfig:
+    """One construction turn may write both modules. Chat and eval keep the default."""
+    return replace(config, open_windows=False, max_steps=_BUILD_STEPS)
 
 
 def _finish_build(
@@ -522,35 +694,115 @@ def _finish_build(
     ask: AskFunc,
     on_event: EventHandler | None,
     mode: str,
+    request: str = "",
+    stages: _Stages | None = None,
 ) -> int:
-    """Compile the folder and start the program. One repair if that fails.
-
-    A start is not a pass. Only a failed launch is recorded here.
-    """
+    """Keep diagnosing and fixing until the program runs. A start is not a pass."""
     if mode not in {"build", "update"} or not config.open_windows or not _has_program(config.project_root):
         return 0
-    code, report = _compile_and_show(config, on_event)
-    if code == 0:
-        return 0
-    _emit(on_event, LoopEvent("status", "Fixing the launch.", title="Working", body="Fixing the launch."))
+    return _until_it_runs(store, session, model, config, ask, on_event, request, stages)
+
+
+_FIX_LIMIT = 8
+
+
+def _until_it_runs(
+    store: SessionStore,
+    session: Session,
+    model: ChatModel,
+    config: HarnessConfig,
+    ask: AskFunc,
+    on_event: EventHandler | None,
+    request: str,
+    stages: _Stages | None = None,
+) -> int:
+    """Name the fault, fix what the harness can, then ask the model. Stop only when it runs or the same fault is stuck."""
+    root = config.project_root
+    seen: tuple[str, ...] | None = None
+    seen_files: dict[str, str] | None = None
+    launch_report = ""
+    report = ""
+    code = 1
+    faults: list[dict] = []
+    for _attempt in range(_FIX_LIMIT):
+        faults = troubleshoot(root, request, launch=launch_report)
+        if faults:
+            save_faults(root, faults)
+            before = file_versions(root)
+            close_known_faults(root, request)
+            if file_versions(root) != before:
+                launch_report = ""
+                continue
+            signature = tuple(str(item.get("cause") or "") for item in faults)
+            if signature == seen and file_versions(root) == seen_files:
+                break
+            seen = signature
+            seen_files = file_versions(root)
+            _repair(store, session, model, config, ask, on_event, fault_brief(faults))
+            if stages is not None:
+                stages.lap("repair")
+            launch_report = ""
+            continue
+        _meter(on_event, "80")
+        code, report = _compile_and_show(config, on_event)
+        if stages is not None:
+            stages.lap("check")
+        if code == 0:
+            lines = [line for line in probe_logic(root, request) if line.startswith("passed:")]
+            if lines:
+                settle_task(root, report or "checked", lines)
+            close_faults(root)
+            _meter(on_event, "95")
+            return 0
+        launch_report = report
+        faults = troubleshoot(root, request, launch=launch_report)
+        if faults:
+            save_faults(root, faults)
+    evidence = ["failed: logic"]
+    evidence.extend(
+        f"failed: {item.get('where') or 'logic'}. {item.get('cause') or 'the program is still broken.'}"
+        for item in faults
+    )
+    settle_task(root, fault_brief(faults) or report or "failed: logic", evidence)
+    return code or 1
+
+
+def _open_cause(root: Path) -> str:
+    record = load_task(root)
+    if record is None:
+        return ""
+    open_faults = [item for item in record.get("faults") or [] if item.get("state") != "fixed"]
+    if not open_faults:
+        return ""
+    fault = open_faults[0]
+    return f"{fault.get('symptom', '')} {fault.get('cause', '')}".strip()
+
+
+def _repair(
+    store: SessionStore,
+    session: Session,
+    model: ChatModel,
+    config: HarnessConfig,
+    ask: AskFunc,
+    on_event: EventHandler | None,
+    problem: str,
+) -> None:
+    _meter(on_event, "60")
+    _emit(on_event, LoopEvent("status", "Fixing the program.", title="Working", body="Fixing the program."))
     run_turn(
         store=store,
         session=session,
         user_text=(
-            "The program did not compile or launch. Fix the files in the project. "
-            "Do not paste source in the answer.\n"
-            + brief_report(report)
+            "The program failed a check. Repair the open fault. "
+            "Do not stop, and do not paste source.\n"
+            + brief_report(problem)
         ),
         model=model,
-        config=config,
+        config=replace(config, open_windows=False),
         ask=ask,
         on_event=on_event,
         focus=True,
     )
-    code, report = _compile_and_show(config, on_event)
-    if code != 0:
-        settle_task(config.project_root, report, ["failed: launch"])
-    return code
 
 
 def _compile_and_show(config: HarnessConfig, on_event: EventHandler | None) -> tuple[int, str]:
@@ -564,11 +816,74 @@ def _compile_and_show(config: HarnessConfig, on_event: EventHandler | None) -> t
 def _has_program(root: Path) -> bool:
     if not root.is_dir():
         return False
-    suffixes = {".py", ".java", ".html", ".htm"}
+    suffixes = {".py", ".java"}
     return any(
         path.is_file() and path.suffix.lower() in suffixes and not path.name.startswith("test_")
         for path in root.iterdir()
     )
+
+
+def _wants_verify(text: str) -> bool:
+    """A check of the open project. This is not a request to build a new one."""
+    lowered = " ".join(text.lower().split())
+    if lowered in {"verify", "verify build", "verify it", "check the build", "check this build"}:
+        return True
+    return lowered.startswith("verify ")
+
+
+def _verify_open(
+    store: SessionStore,
+    session: Session,
+    config: HarnessConfig,
+    on_event: EventHandler | None,
+    choose,
+) -> int:
+    """Check the folder already open. Do not ask what kind of software it is."""
+    placed = _assign(store, session, "verify", config, choose, on_event)
+    if placed is None:
+        return 0
+    config, _notice = placed
+    root = config.project_root
+    if root.parent.name != PROJECTS_DIR:
+        message = "No project is open. Build one first."
+        _emit(on_event, LoopEvent("answer", message, title="Result", body=message))
+        return 0
+    record = load_task(root)
+    request = str(record.get("request") or "") if record else ""
+    faults = troubleshoot(root, request)
+    if faults:
+        save_faults(root, faults)
+        brief = fault_brief(faults)
+        evidence = [
+            f"failed: {item.get('where') or 'logic'}. {item.get('cause') or 'the program is still broken.'}"
+            for item in faults
+        ]
+        settle_task(root, brief, evidence)
+        _meter(on_event, "failed")
+        _emit(on_event, LoopEvent("answer", brief, title="Result", body=brief))
+        return 1
+    if not config.open_windows:
+        message = f"Open project: {PROJECTS_DIR}/{root.name}. The files match the request."
+        _emit(on_event, LoopEvent("answer", message, title="Result", body=message))
+        return 0
+    code, report = compile_and_launch(config)
+    _emit(on_event, LoopEvent("run", brief_report(report), title="Run", body=brief_report(report)))
+    _show_verdict(root, on_event, opened=code == 0)
+    return code
+
+
+def _with_project(note: str, root: Path) -> str:
+    """Tell the model which folder is open. A later message stays in that folder."""
+    if root.parent.name != PROJECTS_DIR:
+        return note
+    head = (
+        f"Open project: {PROJECTS_DIR}/{root.name}. Work only in this folder. "
+        "Read those files before editing. Do not create another product."
+    )
+    listing = repo_map(root)
+    if listing:
+        head = head + "\n" + listing
+    return (head + "\n" + note).strip() if note else head
 
 
 def _follow_up(text: str, notice: str, config: HarnessConfig) -> tuple[str, HarnessConfig]:
@@ -601,8 +916,8 @@ def _edits_only(config: HarnessConfig) -> HarnessConfig:
     return replace(config, permissions=permissions)
 
 
-def _with_web_choice(text: str, on_event: EventHandler | None, reply) -> str:
-    question = kind_question(text)
+def _with_web_choice(text: str, on_event: EventHandler | None, reply, has_project: bool = False) -> str:
+    question = kind_question(text, has_project=has_project)
     if question and reply is not None:
         return apply_kind(text, reply(question))
     if task_kind(text):
@@ -655,8 +970,10 @@ def _slash(
         body = skill_catalog()
     elif command == "/status":
         root = _work_root(store, session, config)
+        folder = f"{PROJECTS_DIR}/{root.name}" if root.parent.name == PROJECTS_DIR else "none"
         pending = ", ".join(item.text for item in open_todos(root)) or "none"
         body = (
+            f"project {folder}\n"
             f"model {config.model}\n"
             f"profile local\n"
             f"phase {store.get_phase(session)}\n"
